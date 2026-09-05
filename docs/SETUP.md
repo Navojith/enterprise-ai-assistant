@@ -78,7 +78,7 @@ committed and must stay in sync whenever a variable is added.
 | `LANGSMITH_TRACING` | `true` to enable tracing |
 | `OLLAMA_BASE_URL` | Default `http://localhost:11434` |
 | `OLLAMA_MODEL` | Default `qwen3:4b` |
-| `DATABASE_URL` | Postgres connection string |
+| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | Postgres connection, assembled into a DSN by `Settings.database_url`. `docker-compose.yml` provisions the container from these same names. |
 | `JWT_SECRET_KEY` | Token signing secret |
 | `JWT_EXPIRE_MINUTES` | Token lifetime |
 | `RERANK_ENABLED` | `false` in development — protects the 500/month budget |
@@ -148,6 +148,6 @@ for why hardcoded users were chosen over Keycloak.
 | Pinecone auth errors | `PINECONE_API_KEY` missing or the index is in a non-`us-east-1` region. |
 | No traces in LangSmith | `LANGSMITH_TRACING` is not `true`, or the key is missing. |
 | Readiness check / any Postgres feature fails with `Psycopg cannot use the 'ProactorEventLoop'` | Windows only. Uvicorn defaults to `ProactorEventLoop`, which psycopg's async mode cannot use. Always launch with `--loop backend.app.core.loop:selector_loop_factory` as shown above — see `backend/app/core/loop.py` for why. |
-| Postgres connection succeeds but returns `password authentication failed for user "postgres"` even though `docker compose ps` shows the container healthy | Something else on the machine — commonly a natively-installed Postgres — is already listening on port 5432 and is shadowing the container on `localhost`. This project's compose file deliberately publishes the container on host port **5433** (`DATABASE_URL` in `.env.example` matches); if you changed it back to 5432, check `docker port enterprise-ai-assistant-postgres` and whatever else owns 5432 before assuming the container is broken. |
+| Postgres connection succeeds but returns `password authentication failed for user "postgres"` even though `docker compose ps` shows the container healthy | Something else on the machine — commonly a natively-installed Postgres — is already listening on port 5432 and is shadowing the container on `localhost`. This project's compose file deliberately publishes the container on host port **5433** (`DB_PORT` in `.env.example` matches, and `docker-compose.yml` reads the same variable); if you changed it back to 5432, check `docker port enterprise-ai-assistant-postgres` and whatever else owns 5432 before assuming the container is broken. |
 | Reranking silently inactive | Expected in development (`RERANK_ENABLED=false`), or the monthly budget guard has tripped. |
 | Postgres connection failures | `docker compose ps` — confirm the container is healthy. |

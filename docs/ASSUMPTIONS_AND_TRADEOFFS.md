@@ -152,10 +152,27 @@ own port-forward, so connections to `localhost:5432` reached the *wrong* databas
 `postgres`/`postgres` failed against it, which looks identical to a genuine credential error and would
 have cost real debugging time without the container's healthcheck output pointing anywhere useful.
 
-**Fix:** `docker-compose.yml` publishes the project's Postgres on host port **5433**; `DATABASE_URL`
-in `.env.example` and the default in `backend/app/core/config.py` both point at it. The existing
+**Fix:** `docker-compose.yml` publishes the project's Postgres on host port **5433**; `DB_PORT` in
+`.env.example` and the default in `backend/app/core/config.py` both point at it, and
+`docker-compose.yml` reads the same `.env` variable so the two can't drift apart. The existing
 native service was left untouched — it may serve some other purpose on this machine, and moving our
 own container off the contested port is non-destructive either way.
+
+### 10. Postgres connection settings are five granular fields, not one DSN
+
+**Changed on request:** `DATABASE_URL` was replaced with `DB_HOST` / `DB_PORT` / `DB_NAME` /
+`DB_USER` / `DB_PASSWORD`, and `Settings.database_url` became a computed property that assembles
+the DSN (with the user and password percent-encoded, since either could contain a `:` or `@` that
+would otherwise be parsed as a DSN delimiter). `docker-compose.yml` now provisions the container's
+credentials from these same names via Compose's automatic `.env` substitution, so the container and
+the app can no longer disagree about what database they mean.
+
+**Consequence surfaced while wiring it up:** pydantic-settings treats a variable that is *present
+but blank* in `.env` (`DB_HOST=`) as an explicit empty-string value, not as "unset" — which would
+have silently produced a broken DSN (and, separately, `SecretStr("")` instead of `None` for the
+already-blank `PINECONE_API_KEY`/`LANGSMITH_API_KEY`/`JWT_SECRET_KEY` fields from Cycle 0). Fixed by
+setting `env_ignore_empty=True` on `Settings.model_config`, so a blank value falls back to the
+field's default exactly like an absent one does.
 
 ---
 

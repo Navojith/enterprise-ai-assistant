@@ -1,24 +1,29 @@
 # Postgres only — the backend, MCP server and Streamlit frontend run natively against it.
 # Full containerization was a bonus item, deliberately not selected; see docs/DECISIONS.md §7.
+#
+# Reads DB_* from .env (Compose loads that file automatically from the project directory), so
+# the container's credentials and the app's own DB_HOST/PORT/NAME/USER/PASSWORD settings
+# (backend/app/core/config.py) come from one place instead of two that can drift apart. The
+# `:-` defaults below match .env.example and only apply if .env is missing a value entirely.
 services:
   postgres:
     image: postgres:16-alpine
     container_name: enterprise-ai-assistant-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: enterprise_ai_assistant
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-enterprise_ai_assistant}
     ports:
       # Host-side 5433, not the Postgres default 5432: a dev machine commonly already runs a
       # native Postgres service on 5432, which silently shadows this container on Windows
       # (same loopback address, first bind wins) and produces confusing auth failures against
       # someone else's database rather than a connection-refused. See docs/SETUP.md.
-      - "5433:5432"
+      - "${DB_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d enterprise_ai_assistant"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-enterprise_ai_assistant}"]
       interval: 5s
       timeout: 5s
       retries: 10

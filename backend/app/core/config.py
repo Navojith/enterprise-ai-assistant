@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import quote
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,6 +34,10 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # A variable present in .env but left blank (`DB_HOST=`) means "use the default", not
+        # "the value is the empty string" — without this, an unfilled secret or host would
+        # resolve to SecretStr("") / "" rather than falling back to a working local default.
+        env_ignore_empty=True,
     )
 
     # --- Application ---
@@ -54,9 +59,28 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen3:4b"
 
     # --- Postgres ---
-    database_url: str = (
-        "postgresql+psycopg://postgres:postgres@localhost:5433/enterprise_ai_assistant"
-    )
+    # Held as separate fields, not a single DSN, so docker-compose.yml can provision the
+    # container from the same names (it reads this same .env file for variable substitution)
+    # without the container's credentials and the app's connection string drifting apart.
+    db_host: str = "localhost"
+    db_port: int = Field(default=5433, gt=0, le=65535)
+    db_name: str = "enterprise_ai_assistant"
+    db_user: str = "postgres"
+    db_password: SecretStr = SecretStr("postgres")
+
+    @property
+    def database_url(self) -> str:
+        """Assemble the SQLAlchemy/psycopg async DSN from the granular DB_* settings.
+
+        User and password are percent-encoded because a DSN embeds them positionally — an
+        unescaped `:` or `@` in either would otherwise be parsed as a URL delimiter instead of
+        as part of the credential.
+        """
+        user = quote(self.db_user, safe="")
+        password = quote(self.db_password.get_secret_value(), safe="")
+        return (
+            f"postgresql+psycopg://{user}:{password}@{self.db_host}:{self.db_port}/{self.db_name}"
+        )
 
     # --- Auth (Cycle 2) ---
     jwt_secret_key: SecretStr | None = None
