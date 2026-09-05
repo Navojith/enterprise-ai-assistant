@@ -1,1 +1,1 @@
-"""Supervisor, Retrieval, Research, Response and Validator nodes. Built in Cycle 3."""
+"""Supervisor, Retrieval, Response and Validator nodes (Cycle 3); Research joins in Cycle 5."""

@@ -170,6 +170,17 @@ class MCPUnavailableError(MCPError):
     http_status = status.HTTP_503_SERVICE_UNAVAILABLE
 
 
+class GraphUnavailableError(AppError):
+    """The compiled LangGraph graph or its `AsyncPostgresSaver` checkpointer failed to
+    initialize at startup (e.g. Postgres was unreachable) — `main.py`'s lifespan degrades this
+    to a warning log and a `None` on `app.state` rather than crashing the whole process, so
+    liveness/readiness stay servable; `api/v1/chat.py` raises this instead of an `AttributeError`
+    the first time a chat request actually needs the graph."""
+
+    code = "graph_unavailable"
+    http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+
+
 class GuardrailViolationError(AppError):
     """A guardrail rejected the input or the output: prompt injection, a hallucinated
     citation, or a brand/safety violation."""

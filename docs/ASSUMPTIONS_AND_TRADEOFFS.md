@@ -215,12 +215,77 @@ never need to know which modules define what, and a new table added in a later c
 line added to that one function, not a new import scattered into every entry point that might run
 before it.
 
+### 13. Ollama's defaults silently undermined two of `docs/DECISIONS.md`'s hardware assumptions
+
+**Found while verifying the Cycle 3 prerequisite** (a first `ollama run qwen3:4b "Reply with OK"` took
+~1 minute — orders of magnitude slower than §3's ~60–90 s *per question*, for a two-token reply).
+Measured live against `ollama` 0.33.3 rather than assumed from the earlier hardware analysis:
+
+**Finding A — partial GPU offload by default.** `ollama ps` showed `33%/67% CPU/GPU` even though
+`qwen3:4b` (Q4_K_M, 3.5 GB) fits entirely inside the 4 GB card. Ollama's automatic layer-placement
+heuristic reserves headroom conservatively and does not maximize GPU residency on its own. Measured
+throughput at that split: **~18 tok/s**. Forcing `options.num_gpu: 99` (request all layers onto GPU)
+produced `100% GPU`, 3.1/4.0 GB VRAM used, and **~57 tok/s** — matching §3's original estimate exactly.
+**Fix:** every call from `llm/ollama_provider.py` sets `num_gpu: 99` explicitly; this is not left to
+the default.
+
+**Finding B — `think: false` is unreliable without `format`.** `qwen3:4b` is a hybrid-reasoning model
+that opens every reply with a `<think>...</think>` block unless told otherwise. Tested across
+`/api/generate` and `/api/chat`, with and without a JSON schema:
+
+| `format` set? | `think` value | Result |
+| --- | --- | --- |
+| No | `false` | **Broken** — the `<think>` block is left concatenated into `content` unsplit; the caller cannot tell reasoning from answer. |
+| No | unset (default) / `true` | Clean — `content` is just the answer, reasoning arrives separately in `message.thinking`. |
+| Yes | unset (default) | Clean on `/api/chat` — `content` is valid JSON *and* `message.thinking` is populated (both, at the cost of the extra reasoning tokens). On `/api/generate` this combination is worse than broken: the JSON lands entirely in a `thinking` field and `response` comes back **empty**. |
+| Yes | `false` | Clean and fastest — `content` is valid JSON, no `thinking` field, fewest tokens. |
+
+**Consequence for the design:** `docs/DECISIONS.md` §5 already commits every routing/validation
+decision to schema-constrained decoding, which is exactly the row that behaves correctly. The
+implementation rule is therefore: **`think: false` is only ever sent alongside `format`**, on
+`/api/chat` (never `/api/generate`, whose format+think interaction was verified broken). The
+free-text Response node does not fight thinking mode at all — it leaves `think` at its default and
+forwards the separated `message.thinking` to the Agent Activity Panel as visible reasoning, turning a
+model quirk into a demo strength rather than suppressing it unreliably.
+
+**Cost:** none of this changed the model choice or the architecture — §3's "keep `qwen3:4b`" holds.
+The cost was purely investigative time, and the risk it removed was real: shipping `format` alone (the
+naive reading of "use JSON-schema-constrained decoding") against `/api/generate` would have silently
+returned empty responses from the Supervisor and Validator the first time either ran.
+
+### 14. Pydantic field order is load-bearing under JSON-schema-constrained decoding
+
+**Found while verifying Cycle 3's Supervisor live**, on the exact example question
+ASSESSMENT.md's own RLM scenario uses (*"What are the recurring root causes of payment failure
+incidents?"*): the Supervisor's `RoutingDecision` schema originally declared `route` before
+`reasoning`. Under grammar-constrained decoding, Ollama emits JSON fields in the schema's
+declared order and the model commits to each field as it is produced — with `reasoning=False`
+(the Supervisor and Validator's setting, per §5) there is no thinking-mode scratch space either,
+so `route` was being chosen with **zero deliberation**, and the `reasoning` field generated
+immediately afterward would sometimes argue for the opposite route from the one already locked
+in. Live evidence: the payment-failures question was classified `route="direct"` while its own
+`reasoning` field started *"This question requires [internal document search]..."* — an answer
+directly contradicting its own field two positions later.
+
+**Fix:** `agents/nodes/supervisor.py`'s `RoutingDecision` declares `reasoning` *before* `route`,
+forcing one sentence of deliberation to happen before the choice it justifies rather than after.
+Reordering the two fields alone was sufficient — verified live, same question, both turns after
+the fix routed correctly to retrieval.
+
+**Why this matters beyond the one bug:** every schema-constrained decision in this codebase (the
+Supervisor's routing, the Validator's future guardrail verdict in Cycle 6, the RLM planner's
+future plan in Cycle 5) needs its rationale field ordered *before* its decision field whenever
+`reasoning=False` is used, or the constraint that makes a 4B model reliable (§5) can just as
+easily make it reliably wrong, silently, with no error to notice. This is now a checked-by-eye
+rule for every new `BaseModel` schema passed to `astructured()`, not something the framework
+enforces — worth a lint rule or schema convention if a future cycle adds many more of these.
+
 ---
 
 ## Known limitations
 
-- **Latency.** Expect 60–90 seconds per question. This is dominated by local inference on a 4 GB GPU,
-  not by the architecture.
+- **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see
+  trade-off 13. Still dominated by local inference on a 4 GB GPU, not by the architecture.
 - **Answer quality is model-bound**, not design-bound. See trade-off 1.
 - **Synthetic corpus** means retrieval quality is not validated against real enterprise documents.
 - **No evaluation harness.** There is no automated answer-quality benchmark; correctness is verified

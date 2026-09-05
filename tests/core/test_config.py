@@ -61,6 +61,27 @@ def test_database_url_percent_encodes_special_characters_in_credentials() -> Non
     assert settings.database_url.startswith("postgresql+psycopg://a%40b:p%3Aw%40rd@")
 
 
+def test_psycopg_dsn_strips_the_sqlalchemy_driver_suffix() -> None:
+    """`psycopg.AsyncConnection.connect()` and `AsyncPostgresSaver` (Cycle 3) speak a plain
+    libpq conninfo string, not SQLAlchemy's `dialect+driver://` syntax — see `api/v1/health.py`
+    and `main.py`'s checkpointer setup, both of which use this property so the two connection
+    strings can never drift apart."""
+    settings = Settings(
+        _env_file=None,
+        db_host="db.internal",
+        db_port=6543,
+        db_name="assistant",
+        db_user="app",
+        db_password="hunter2",
+    )
+
+    assert settings.psycopg_dsn == "postgresql://app:hunter2@db.internal:6543/assistant"
+    assert (
+        settings.database_url
+        == f"postgresql+psycopg://{settings.psycopg_dsn.removeprefix('postgresql://')}"
+    )
+
+
 def test_blank_env_values_fall_back_to_defaults_instead_of_becoming_empty(tmp_path: Path) -> None:
     """A variable present but left blank in `.env` (`DB_HOST=`) must behave like an absent one,
     not like an explicit empty string — otherwise an unfilled `.env` produces a broken DSN and

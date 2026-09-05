@@ -11,25 +11,29 @@
 
 ## Current state
 
-**Cycles 0, 1 and 2 are done.** Cycle 0's scaffold, config, logging, errors, app factory and health
-checks are built and verified against real Postgres. Cycle 1's corpus (64 documents, 224 chunks),
-hybrid retrieval, and reranking are built and verified against a **real, live Pinecone Starter
-account** — indexes created, all 224 chunks ingested into both the dense and sparse indexes across
-6 namespaces, idempotency confirmed (a second `python -m scripts.ingest` run re-embeds zero chunks),
-RBAC access-level filtering confirmed across roles, and reranking confirmed end to end including its
-Postgres-backed budget counter. Cycle 2's static user store, JWT issue/verify, the
-`Principal`/role→permission matrix, FastAPI dependency wiring, and the Postgres-backed token-bucket
-rate limiter are built and verified against a real, live Postgres container end to end — login for
-all three roles, `GET /api/v1/auth/me` resolving a bearer token back to its principal, a
-`require_permission`-gated route returning 403 for a viewer and 200 for an administrator, and 20
-real requests against a `RATE_LIMIT_CAPACITY=20` bucket followed by two real 429s with a correct
-`retry_after_seconds`, confirmed by reading `rate_limit_buckets` directly in Postgres. See the
-Cycle 2 checklist below and the session log for what that verification found.
+**Cycles 0 through 3 are done.** Cycle 0's scaffold, config, logging, errors, app factory and
+health checks are built and verified against real Postgres. Cycle 1's corpus (64 documents, 224
+chunks), hybrid retrieval, and reranking are built and verified against a **real, live Pinecone
+Starter account**. Cycle 2's static user store, JWT issue/verify, the `Principal`/role→permission
+matrix, FastAPI dependency wiring, and the Postgres-backed token-bucket rate limiter are built and
+verified against a real, live Postgres container end to end. See each cycle's checklist below and
+the session log for what verification found.
 
-**Next action:** get a LangSmith Developer API key and install Ollama (`ollama pull qwen3:4b`; no
-payment method / credit card on either — see `docs/SETUP.md`), then start **Cycle 3 — LangGraph
-core, memory, streaming**. It is the largest cycle and needs Ollama, `qwen3:4b`, a LangSmith key,
-and Postgres running — resolve the two remaining external prerequisites before starting it.
+Cycle 3 — the LangGraph core — is built and verified live end to end against real Ollama,
+Pinecone, and Postgres: Supervisor → {Retrieval → Response, Response} → Validator, with a bounded
+retry loop, an `AsyncPostgresSaver` checkpointer (multi-turn memory confirmed by resuming the same
+`thread_id` across turns), rolling-summary memory, the `LLMProvider`/`OllamaProvider`/
+`FallbackChain` stack, and an SSE endpoint streaming typed `ActivityEvent`s. Two real findings from
+that verification are recorded where a future session would otherwise rediscover them the hard
+way: `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 13 (Ollama's default GPU offload and thinking-
+mode quirks) and trade-off 14 below (a schema field-order bug that silently mis-routed the RLM
+demo's own example question). **LangSmith tracing itself is not wired yet** — the key was verified
+to authenticate, but `observability/langsmith.py` is a Cycle 7 deliverable; Cycle 3's graph was
+verified via its own `ActivityEvent` stream, not via LangSmith traces.
+
+**Next action:** start **Cycle 4 — Tools and RBAC enforcement** (`tools/registry.py`,
+`knowledge_search`, `python_analysis`, the FastMCP server, and the async MCP client). No external
+prerequisites are blocking it — Ollama, Pinecone, LangSmith and Postgres are all already configured.
 
 ---
 
@@ -39,9 +43,9 @@ These are user-side actions. Full instructions in `docs/SETUP.md`.
 
 | Prerequisite | Needed by | Status |
 | --- | --- | --- |
-| Ollama installed + `ollama pull qwen3:4b` | Cycle 3 | ⬜ not done |
+| Ollama installed + `ollama pull qwen3:4b` | Cycle 3 | ✅ done — see `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 13 for the throughput/thinking-mode findings this surfaced |
 | Pinecone Starter account, API key, **no payment method attached** | Cycle 1 | ✅ done |
-| LangSmith Developer account, API key, **no credit card attached** | Cycle 3 | ⬜ not done |
+| LangSmith Developer account, API key, **no credit card attached** | Cycle 3 | ✅ done (key verified live against `api.smith.langchain.com`) |
 | `.env` populated from `.env.example` | Cycle 1 | ✅ done (Pinecone key set; DB_* left at defaults) |
 | `JWT_SECRET_KEY` generated (`openssl rand -hex 32`) | Cycle 2 | ✅ done |
 
@@ -54,7 +58,7 @@ These are user-side actions. Full instructions in `docs/SETUP.md`.
 | 0 | Foundation scaffold | 2h | ✅ done |
 | 1 | Corpus and hybrid retrieval | 4h | ✅ done |
 | 2 | Auth, RBAC, rate limiting | 2.5h | ✅ done |
-| 3 | LangGraph core, memory, streaming | 5h | ⬜ pending |
+| 3 | LangGraph core, memory, streaming | 5h | ✅ done |
 | 4 | Tools and RBAC enforcement | 3h | ⬜ pending |
 | 5 | RLM research agent | 4h | ⬜ pending |
 | 6 | Guardrails and validation | 2.5h | ⬜ pending |
@@ -145,16 +149,53 @@ inspection endpoint is the likely candidate), rather than shipping an empty plac
 now. `require_permission(Permission.ADMIN_TOOLS)` is already built and tested in `api/deps.py`
 so that cycle only needs to write the route, not the authorization plumbing under it.
 
-### Cycle 3 — LangGraph core, memory, streaming ⬜
+### Cycle 3 — LangGraph core, memory, streaming ✅
 
-- [ ] `agents/state.py` — typed `AgentState` with merge reducers
-- [ ] Supervisor / Retrieval / Response / Validator nodes
-- [ ] Conditional edges + bounded validator→response retry loop
-- [ ] `AsyncPostgresSaver` checkpointer, thread per session
-- [ ] Rolling-summary session memory
-- [ ] `llm/provider.py` protocol + `llm/ollama_provider.py` (JSON-schema-constrained output)
-- [ ] `llm/chain.py` — fallback chain + circuit breaker
-- [ ] SSE endpoint streaming typed activity events
+- [x] `agents/state.py` — typed `AgentState`; `merge_retrieved_chunks` reducer dedupes by
+      `chunk_id` keeping the higher score, ready for Cycle 5's concurrent sub-agent writes
+- [x] Supervisor / Retrieval / Response / Validator nodes (`agents/nodes/`) — Supervisor does
+      schema-constrained routing (`"retrieval"` / `"direct"`) plus rolling-summary upkeep;
+      Retrieval reuses Cycle 1's `hybrid_search`/`rerank_chunks` unchanged; Response streams
+      both the answer and `qwen3`'s separated reasoning to the activity panel; Validator is a
+      structural check this cycle (non-empty, cited-if-evidenced) — Cycle 6 replaces the check,
+      not the node's shape
+- [x] Conditional edges + bounded Validator→Response retry loop (`agents/graph.py`) — the
+      retry bound is a `build_graph(..., max_validator_retries=...)` closure over
+      `Settings.max_validator_retries`, not a `Runtime` lookup, so it's a plain unit-testable
+      `state -> str` function; exhausting the budget still appends the last draft with a
+      caveat rather than discarding it
+- [x] `AsyncPostgresSaver` checkpointer (`main.py`'s lifespan owns an `AsyncConnectionPool`,
+      `agents/graph.py` accepts it as a parameter) — multi-turn memory verified live: a second
+      turn on the same `thread_id` sees the first turn's exchange with no application code
+      re-supplying it
+- [x] Rolling-summary session memory (`memory/summarizer.py`, `memory/session.py`) —
+      `needs_summarization`/`summarize_oldest` split pure trigger from the LLM call, folding
+      the oldest messages into `state["summary"]` and dropping them via `RemoveMessage`
+- [x] `llm/provider.py` (`LLMProvider` Protocol) + `llm/ollama_provider.py` (`ChatOllama`-backed,
+      forces `num_gpu=99`, pairs `think: false` only with `format` — see trade-off 13) — verified
+      live: 57 tok/s fully GPU-resident, clean structured routing on the RLM demo's own example
+      question after fixing trade-off 14's field-order bug, clean reasoning/content separation
+      on free-text streaming
+- [x] `llm/chain.py` — `FallbackChain` + `CircuitBreaker` (pure transition logic split out,
+      same pattern as `rate_limit.py`'s refill math); one tier configured today per
+      `docs/DECISIONS.md` §7
+- [x] SSE endpoint (`api/v1/chat.py`, `POST /api/v1/chat/stream`) streaming typed `ActivityEvent`s
+      via `stream_mode="custom"` — the panel observes the graph's own `StreamWriter` calls
+      directly, not a parallel narration
+- [x] `tests/agents/`, `tests/memory/`, `tests/llm/`, `tests/api/test_chat.py` — 43 new tests
+      (134 total) covering the chunk-merge reducer, both conditional-edge functions, the
+      Validator's structural check, the summarizer's trigger boundary and message-folding, the
+      circuit breaker's state transitions (`freezegun`), `FallbackChain`'s fallback/breaker/
+      partial-stream behavior, and the chat endpoint's auth/wiring/graceful-503 paths — plus a
+      full live run against real Ollama, Pinecone and Postgres (see above and the session log).
+      `ruff`, `ruff format`, `mypy --strict` all pass clean.
+
+Two fixes landed as part of this cycle's own verification, not deferred: `main.py`'s lifespan
+degrades `pinecone_store`/`app.state.graph` to `None` rather than crashing the process when
+Pinecone or the checkpointer is unreachable at startup (`GraphContext.pinecone_store: PineconeStore
+| None`, a new `GraphUnavailableError`) — without this, every existing test using `TestClient(
+create_app())` would have started failing the moment this cycle's lifespan additions landed,
+since the test environment has no `PINECONE_API_KEY`.
 
 ### Cycle 4 — Tools and RBAC enforcement ⬜
 
@@ -210,6 +251,31 @@ From `ASSESSMENT.md`. Tracked separately because these are graded independently 
 
 Newest first. One line per meaningful change.
 
+- **2026-09-05** — Built and verified Cycle 3 (LangGraph core, memory, streaming) end to end
+  against real Ollama, Pinecone, and Postgres. Before starting, verified the two external
+  prerequisites live rather than assuming success from installation alone: the user's first
+  `ollama run qwen3:4b` took ~1 minute for a two-token reply, which turned into its own
+  investigation (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 13) — Ollama's default layer
+  placement left 33% of the model on CPU despite it fitting fully in 4 GB VRAM (~18 tok/s;
+  forcing `num_gpu: 99` fixed it to 100% GPU at ~57 tok/s, matching `docs/DECISIONS.md` §3's
+  original estimate), and `think: false` silently corrupts output on `/api/chat` unless paired
+  with `format` in the same call — encoded as a hard rule in `llm/ollama_provider.py` rather than
+  left as tribal knowledge. Chose `ChatOllama` (already a pinned dependency) over the raw `ollama`
+  client for the provider implementation once source inspection confirmed it implements exactly
+  these request shapes and gets LangSmith/`astream_events` integration for free. A second,
+  independent bug surfaced during live verification of the Supervisor: `RoutingDecision`'s field
+  order (`route` before `reasoning`) let the model commit to a route with zero deliberation under
+  schema-constrained decoding, misrouting the RLM demo's own example question
+  (*"recurring root causes of payment failure incidents"*) to `"direct"` — fixed by reordering the
+  fields (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 14) and reverified live. Also found, while
+  wiring the new lifespan additions, that they would have broken every existing `TestClient`-based
+  test (no `PINECONE_API_KEY` in the test environment) — fixed by making `GraphContext.
+  pinecone_store` and `app.state.graph` degrade to `None` on startup failure instead of crashing,
+  with a new `GraphUnavailableError` surfaced as a clean 503. Full pipeline exercised live:
+  multi-turn memory (a second turn on the same `thread_id` saw the first turn's exchange with no
+  application code re-supplying it), RBAC-filtered retrieval returning 8 cited chunks for the
+  payment-failures question, and the Validator passing a correctly-cited answer. 43 new tests (134
+  total); `ruff`, `ruff format`, `mypy --strict` all pass clean.
 - **2026-09-05** — Built and verified Cycle 2 (auth, RBAC, rate limiting). `bcrypt`, `pyjwt` and
   `freezegun` were pinned in `requirements.txt`/`requirements-dev.txt` since Cycle 0 but not yet
   installed in the venv — installing them surfaced no code issues, just confirmed the pins were

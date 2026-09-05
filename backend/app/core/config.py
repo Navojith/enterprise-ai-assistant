@@ -57,6 +57,26 @@ class Settings(BaseSettings):
     # --- Ollama (Cycle 3) ---
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:4b"
+    # Per-call timeout for a one-shot (structured) request, and the max gap between successive
+    # tokens in a stream before it's treated as stalled — not the total stream duration, since a
+    # legitimate answer plus qwen3's thinking preamble can run well past either number in total.
+    # See docs/ASSUMPTIONS_AND_TRADEOFFS.md trade-off 13 for the throughput this budget assumes.
+    llm_request_timeout_seconds: float = Field(default=30.0, gt=0)
+    llm_stream_stall_timeout_seconds: float = Field(default=30.0, gt=0)
+    # Fallback-chain circuit breaker (llm/chain.py): consecutive failures before a provider is
+    # skipped, and how long it stays skipped before one trial request is allowed through again.
+    llm_circuit_breaker_failure_threshold: int = Field(default=3, gt=0)
+    llm_circuit_breaker_cooldown_seconds: float = Field(default=30.0, gt=0)
+
+    # --- Agent graph (Cycle 3) ---
+    # Bounded Validator -> Response retry loop (docs/ARCHITECTURE.md) — caps total LLM calls per
+    # turn so a persistently-failing validation can't loop the graph indefinitely.
+    max_validator_retries: int = Field(default=1, ge=0)
+    # Rolling-summary memory (memory/summarizer.py): once a thread's raw message count exceeds
+    # this, the oldest `memory_summarize_batch_size` messages are folded into the rolling summary
+    # and dropped from state — bounding context growth within a long-running session.
+    memory_max_verbatim_messages: int = Field(default=12, gt=0)
+    memory_summarize_batch_size: int = Field(default=6, gt=0)
 
     # --- Postgres ---
     # Held as separate fields, not a single DSN, so docker-compose.yml can provision the
@@ -81,6 +101,16 @@ class Settings(BaseSettings):
         return (
             f"postgresql+psycopg://{user}:{password}@{self.db_host}:{self.db_port}/{self.db_name}"
         )
+
+    @property
+    def psycopg_dsn(self) -> str:
+        """The same connection as `database_url`, but as a plain libpq conninfo string —
+        `psycopg.AsyncConnection.connect()` and `AsyncPostgresSaver` speak this directly, not
+        SQLAlchemy's `dialect+driver://` syntax. Used by the health check and, from Cycle 3, by
+        `main.py`'s checkpointer pool — the one connection string, computed once, so the two can
+        never drift apart the way a hand-written `.replace("+psycopg", "")` at each call site
+        risked."""
+        return self.database_url.replace("postgresql+psycopg://", "postgresql://", 1)
 
     # --- Auth (Cycle 2) ---
     jwt_secret_key: SecretStr | None = None

@@ -74,6 +74,17 @@ Therefore **one model serves every node**. This is a hardware-forced decision, n
 does measurably worse than a frontier model. It is mitigated — not eliminated — by JSON-schema-
 constrained decoding (§5).
 
+**Verified live at the start of Cycle 3** (`ollama` 0.33.3, this machine): the assumed 40–55 tok/s
+did not hold out of the box. Ollama's default layer-placement heuristic put only 67% of the model's
+layers on the GPU (`ollama ps` showed `33%/67% CPU/GPU`) even though the whole model fits in 4 GB —
+measured at **~18 tok/s**, which would have roughly tripled every latency estimate in this section.
+Forcing full GPU residency with `options.num_gpu: 99` on every request fixed it: **100% GPU, 3.1/4.0 GB
+VRAM, ~57 tok/s** — back in line with the number this section originally assumed. `llm/ollama_provider.py`
+sets this on every call; it is not optional configuration. See
+`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 13 for the full investigation, including a second,
+independent finding about `qwen3:4b`'s thinking-mode behavior that changes how §5's schema-constrained
+decoding is actually implemented.
+
 ---
 
 ## 4. Zero-cost verification
@@ -133,7 +144,20 @@ and validation verdict is therefore produced with **JSON-schema-constrained deco
 
 This is the single highest-leverage choice for making a small local model behave predictably, and it
 is what makes a multi-agent graph viable on this hardware at all. `qwen3` thinking mode stays **off**
-everywhere except the RLM planner, where reasoning quality justifies the extra tokens.
+(`think: false`) for the Supervisor and Validator; the RLM planner (Cycle 5) requests it
+(`think: true`/default), where reasoning quality justifies the extra tokens.
+
+**A verified quirk this forces into the implementation:** on Ollama's `/api/chat` endpoint, `think:
+false` only behaves correctly when `format` (a JSON schema) is also set in the same call — tested live
+against `qwen3:4b`. With both set, `message.content` comes back as clean, schema-conformant JSON and no
+`thinking` field is present. `think: false` **without** `format` does not suppress reasoning at all; it
+leaves the raw `<think>...</think>` block concatenated directly into `message.content` instead of
+splitting it out — worse than doing nothing, since the caller can no longer tell reasoning from answer.
+The safe rule `llm/ollama_provider.py` encodes: never send `think: false` unless `format` is also set.
+For free-text generation (the Response node), reasoning is left at Ollama's default (on), which *does*
+split cleanly into a separate `thinking` field even without `format` — the Response node forwards that
+field to the Agent Activity Panel as visible reasoning rather than fighting to suppress it. See
+`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 13.
 
 ---
 

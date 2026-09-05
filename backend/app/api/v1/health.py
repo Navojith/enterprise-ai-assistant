@@ -35,19 +35,13 @@ class ReadinessResponse(BaseModel):
     checks: dict[str, str]
 
 
-def _to_psycopg_conninfo(database_url: str) -> str:
-    """psycopg's own `connect()` speaks libpq conninfo strings, not SQLAlchemy's
-    dialect+driver URL syntax — strip the `+psycopg` driver suffix before connecting."""
-    return database_url.replace("postgresql+psycopg://", "postgresql://", 1)
-
-
-async def _check_database(database_url: str) -> str:
+async def _check_database(psycopg_dsn: str) -> str:
     """Open a short-lived connection and run a trivial query. Never raises — a failed
     dependency check is reported in the response body, not surfaced as a 500."""
     try:
         conn = await asyncio.wait_for(
             psycopg.AsyncConnection.connect(
-                _to_psycopg_conninfo(database_url),
+                psycopg_dsn,
                 connect_timeout=int(_READINESS_TIMEOUT_SECONDS),
             ),
             timeout=_READINESS_TIMEOUT_SECONDS,
@@ -71,7 +65,7 @@ async def liveness() -> LivenessResponse:
 async def readiness(
     response: Response, settings: Settings = Depends(get_settings)
 ) -> ReadinessResponse:
-    checks = {"database": await _check_database(settings.database_url)}
+    checks = {"database": await _check_database(settings.psycopg_dsn)}
     healthy = all(value == "ok" for value in checks.values())
     response.status_code = status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE
     return ReadinessResponse(status="ready" if healthy else "not_ready", checks=checks)
