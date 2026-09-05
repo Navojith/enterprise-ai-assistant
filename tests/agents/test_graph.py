@@ -20,8 +20,14 @@ class TestAfterSupervisor:
     def test_routes_to_retrieval_when_the_supervisor_chose_it(self) -> None:
         assert _after_supervisor(_state(route="retrieval")) == "retrieval"
 
+    def test_routes_to_tools_when_the_supervisor_chose_it(self) -> None:
+        assert _after_supervisor(_state(route="tools")) == "tools"
+
     def test_routes_to_response_for_the_direct_route(self) -> None:
         assert _after_supervisor(_state(route="direct")) == "response"
+
+    def test_an_unset_route_falls_back_to_response(self) -> None:
+        assert _after_supervisor(_state()) == "response"
 
 
 class TestAfterValidator:

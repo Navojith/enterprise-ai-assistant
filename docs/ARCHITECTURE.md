@@ -25,6 +25,7 @@ graph TB
     subgraph Graph["LangGraph orchestration"]
         SUP[Supervisor<br/>intent + routing]
         RET[Retrieval agent<br/>single-hop RAG]
+        TLS[Tools node<br/>RBAC-gated tool call]
         RES[Research agent<br/>RLM recursive]
         RSP[Response agent]
         VAL[Validator<br/>citations + guardrails]
@@ -46,8 +47,10 @@ graph TB
 
     UI -->|HTTP + SSE| AUTH --> RL --> SUP
     SUP --> RET
+    SUP --> TLS
     SUP --> RES
     RET --> RSP
+    TLS --> RSP
     RES --> RSP
     RSP --> VAL
     VAL -->|fail, bounded retry| RSP
@@ -56,13 +59,21 @@ graph TB
     RET --> KS
     RES --> KS
     RES --> PA
-    SUP --> MCP
+    TLS --> KS
+    TLS --> PA
+    TLS --> MCP
     KS --> PC
     MCP --> MCPS
     Graph -.-> OLL
     Graph -.-> PG
     Graph -.-> LS
 ```
+
+`TLS` (Cycle 4) is the graph's own tool-calling node — the Supervisor's `"tools"` route,
+distinct from `RET`'s always-on single-hop retrieval and from `RES` (Cycle 5, not yet built).
+It is the one node that ever calls into `Tools`, and every arrow leaving `Tools` toward
+`External` passes through `tools/registry.py`'s execution-boundary RBAC check first — see
+`docs/DECISIONS.md` §6.
 
 ---
 
@@ -105,11 +116,12 @@ enterprise-ai-assistant/
 │   │   └── nodes/
 │   │       ├── supervisor.py        # intent classification, task decomposition, routing
 │   │       ├── retrieval.py         # single-hop RAG
+│   │       ├── tools.py             # RBAC-gated tool selection + execution (Cycle 4)
 │   │       ├── research.py          # multi-hop RLM entry point
 │   │       ├── response.py          # final answer composition
 │   │       └── validator.py         # citation + guardrail gate
 │   ├── rlm/
-│   │   ├── sandbox.py               # AST allowlist, stripped builtins, timeout
+│   │   ├── sandbox.py               # AST allowlist, stripped builtins, timeout — built Cycle 4
 │   │   ├── api.py                   # search / filter / batch / sub_agent / aggregate
 │   │   ├── planner.py               # schema-constrained Python plan generation
 │   │   └── executor.py              # bounded recursion + fan-out
@@ -123,9 +135,11 @@ enterprise-ai-assistant/
 │   │   └── summarizer.py            # rolling summary to bound context growth
 │   ├── tools/
 │   │   ├── registry.py              # RBAC-aware binding + execution-boundary re-check
-│   │   ├── knowledge_search.py
+│   │   ├── knowledge_search.py      # wraps retrieval/hybrid.py + reranker.py
 │   │   ├── python_analysis.py       # reuses rlm/sandbox.py
-│   │   └── mcp_client.py            # async MCP client with timeouts
+│   │   ├── mcp_client.py            # async MCP client with timeouts
+│   │   ├── mcp_tools.py             # RBAC-gated ToolSpecs over the MCP client
+│   │   └── factory.py               # assembles the process's one ToolRegistry
 │   ├── guardrails/
 │   │   ├── injection.py             # instruction-override / exfiltration / tool-abuse detection
 │   │   ├── validators.py            # input + tool-parameter validation
@@ -135,7 +149,8 @@ enterprise-ai-assistant/
 │       ├── langsmith.py             # tracing setup, run metadata
 │       └── events.py                # typed activity event bus feeding the UI
 │
-├── mcp_server/                      # FastMCP: employee directory, service catalog, incidents
+├── mcp_server/                      # mcp.server.mcpserver.MCPServer: employee directory,
+│                                     # service catalog, incidents (Streamable HTTP) — Cycle 4
 ├── frontend/                        # Streamlit chat + Agent Activity Panel
 ├── data/seed/                       # ~60 generated enterprise documents
 ├── scripts/                         # ingest, seed generation, admin utilities
@@ -153,13 +168,21 @@ enterprise-ai-assistant/
 3. **Rate limiting** consumes a token from that user's bucket; exhaustion returns a graceful 429.
 4. **Graph invocation** resumes the session thread from the Postgres checkpointer, so prior turns
    are already present.
-5. **Supervisor** classifies intent with schema-constrained output and routes to Retrieval (single-hop)
-   or Research (multi-hop RLM).
+5. **Supervisor** classifies intent with schema-constrained output and routes to Retrieval
+   (single-hop), Tools (a specific RBAC-gated lookup), or Research (multi-hop RLM) — the prompt
+   only ever names the tool *categories* this principal's role actually has, read from the same
+   `ToolRegistry` the Tools node enforces against (`agents/nodes/supervisor.py`).
 6. **Retrieval** issues dense and sparse queries concurrently, fuses with RRF, optionally reranks once,
    and returns attributed chunks. The `access_level` filter is derived from the principal's role.
+6a. **Tools** (Cycle 4), when routed, chooses one tool from those this principal's role offers
+   (a second, independent RBAC check happens at `tools/registry.py::execute`, not only here),
+   fills in that tool's own parameter schema, and executes it — `knowledge_search`,
+   `python_analysis` (on the same sandbox Research uses), or an MCP-backed lookup (employee
+   directory, service catalog, incident records). Every outcome, including a denial or a tool
+   failure, becomes a plain-English `tool_output` the Response node relays.
 7. **Research**, when routed, generates a Python search plan, validates it against the AST allowlist,
    executes it in the sandbox, fans out to recursive sub-agents under a bounded semaphore, and aggregates.
-8. **Response** composes the answer from retrieved evidence with inline citations.
+8. **Response** composes the answer from retrieved evidence (and any tool output) with inline citations.
 9. **Validator** verifies every citation against retrieved chunk IDs and applies brand and safety
    guardrails. Failure loops back to Response with feedback, bounded by a retry cap.
 10. **Streaming** — throughout, typed activity events (node entered, tool called, retrieval status,
@@ -209,6 +232,17 @@ Layered, with authorization deliberately outside the model — see `docs/DECISIO
 content is framed as untrusted data. Citations are verified against retrieved chunk IDs before an
 answer is released, so hallucinated attribution fails validation rather than reaching the user.
 
+### RBAC — 5%
+
+Enforced twice, independently, per tool call (`tools/registry.py`): **bind time**
+(`available_to`) narrows which tools the Supervisor's and Tools node's LLM calls are even shown,
+and the **execution boundary** (`execute`) re-checks the same principal against the same
+permission regardless of how the call arrived — a viewer handed straight to `execute(...)` with
+no LLM or graph involved is denied exactly the same way a viewer routed there through the graph
+is (`tests/tools/test_registry.py`). The retrieval `access_level` filter
+(`retrieval/models.py::allowed_access_levels`) is the same two-tier idea applied to documents
+instead of tools: derived from the principal's role, never from anything the model emits.
+
 ### Observability — 10%
 
 LangSmith traces conversations, agent transitions, tool calls and retrieval operations. Structured
@@ -216,8 +250,11 @@ JSON logs carry correlation IDs that tie backend logs to trace runs.
 
 ### Async engineering — 5%
 
-Async end to end: Pinecone HTTP, Postgres, Ollama streaming, tool execution, and recursive sub-agent
-fan-out under a bounded semaphore that prevents the RLM from saturating a single local model.
+Async end to end: Pinecone HTTP, Postgres, Ollama streaming, tool execution (including the MCP
+client's Streamable HTTP session), and recursive sub-agent fan-out under a bounded semaphore that
+prevents the RLM from saturating a single local model. The Python Analysis sandbox is the one
+necessary exception — `exec()` is inherently synchronous — and is run on a worker thread via
+`asyncio.wait_for(loop.run_in_executor(...))` rather than blocking the event loop directly.
 
 ---
 

@@ -1,14 +1,15 @@
-r"""LangGraph assembly: wires the four Cycle 3 nodes into one compiled, checkpointed graph.
+r"""LangGraph assembly: wires the Cycle 3 nodes plus Cycle 4's Tools node into one compiled,
+checkpointed graph.
 
 ```
 START -> supervisor --route=retrieval--> retrieval -> response -> validator --pass/exhausted--> END
-              \--route=direct-----------------------> response -----^          \--retry--> response
+              |--route=direct-----------------------> response -----^          \--retry--> response
+              \--route=tools----------> tools -------> response -----^
 ```
 
-Cycle 4 adds tool-calling edges out of the Supervisor; Cycle 5 adds a `"research"` route to a new
-Research node. Both are additive to this topology, not a rewrite of it — the conditional-edge
-functions below already read `state["route"]` from a schema that a later cycle only needs to
-widen, not replace.
+Cycle 5 adds a `"research"` route to a new Research node — additive to this topology, not a
+rewrite of it — the conditional-edge function below already reads `state["route"]` from a
+schema that only needs to widen, not replace.
 
 The checkpointer is accepted as a parameter, built by `main.py`'s lifespan and owned by it for
 the process's lifetime (`AsyncPostgresSaver` needs an open connection/pool and its own `setup()`
@@ -30,12 +31,15 @@ from backend.app.agents.context import GraphContext
 from backend.app.agents.nodes.response import response_node
 from backend.app.agents.nodes.retrieval import retrieval_node
 from backend.app.agents.nodes.supervisor import supervisor_node
+from backend.app.agents.nodes.tools import tools_node
 from backend.app.agents.nodes.validator import validator_node
 from backend.app.agents.state import AgentState
 
+_SUPERVISOR_ROUTES = {"retrieval": "retrieval", "tools": "tools"}
+
 
 def _after_supervisor(state: AgentState) -> str:
-    return "retrieval" if state.get("route") == "retrieval" else "response"
+    return _SUPERVISOR_ROUTES.get(state.get("route", ""), "response")
 
 
 def _make_after_validator(*, max_validator_retries: int) -> Callable[[AgentState], str]:
@@ -67,14 +71,18 @@ def build_graph(
 
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("retrieval", retrieval_node)
+    graph.add_node("tools", tools_node)
     graph.add_node("response", response_node)
     graph.add_node("validator", validator_node)
 
     graph.add_edge(START, "supervisor")
     graph.add_conditional_edges(
-        "supervisor", _after_supervisor, {"retrieval": "retrieval", "response": "response"}
+        "supervisor",
+        _after_supervisor,
+        {"retrieval": "retrieval", "tools": "tools", "response": "response"},
     )
     graph.add_edge("retrieval", "response")
+    graph.add_edge("tools", "response")
     graph.add_edge("response", "validator")
     after_validator = _make_after_validator(max_validator_retries=max_validator_retries)
     graph.add_conditional_edges("validator", after_validator, {"response": "response", END: END})

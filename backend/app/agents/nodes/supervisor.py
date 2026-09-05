@@ -1,10 +1,21 @@
 """Supervisor node: intent classification and routing, plus this turn's memory upkeep.
 
 Routing is schema-constrained (`docs/DECISIONS.md` §5) — the model chooses one of a fixed set of
-literal routes, never free text a caller would have to parse back into a decision. Only two
-routes exist until later cycles add more: `"retrieval"` for anything that benefits from internal
-evidence, `"direct"` for what does not (greetings, clarifying questions). Cycle 4 adds tool
-routes; Cycle 5 adds `"research"` for the RLM path.
+literal routes, never free text a caller would have to parse back into a decision. Three routes
+exist this cycle: `"retrieval"` for anything that benefits from internal document evidence,
+`"direct"` for what does not (greetings, clarifying questions), and `"tools"` (Cycle 4) for a
+request naming a specific lookup a tool answers directly — an employee, a service, an incident
+id, or a small computation over data already in the conversation — rather than an open-ended
+question. Cycle 5 adds `"research"` for the RLM path.
+
+The prompt only ever names the tool *categories* this principal's role actually has
+(`_available_tool_categories`, from `runtime.context.tool_registry.available_to`) — a Viewer,
+who has no tools beyond search, is never told "tools" exist for anything beyond that, so it
+never routes there for an analytics or MCP-shaped request in the first place. This is bind-time
+filtering applied one level up from `tools/registry.py`'s own (which narrows what
+`agents/nodes/tools.py` later offers *as a specific tool name*): the Supervisor is filtered on
+tool *categories*, the Tools node on tool *names* — both read from the same `ToolRegistry`, so
+neither can drift from what `tools/registry.py::execute` will actually allow at the boundary.
 
 Memory upkeep — folding old messages into the rolling summary when the thread grows past its
 verbatim budget — runs here rather than as a separate graph node, because the Supervisor already
@@ -24,21 +35,47 @@ from langgraph.runtime import Runtime
 from pydantic import BaseModel, Field
 
 from backend.app.agents.context import GraphContext
+from backend.app.agents.principal import principal_from_state
 from backend.app.agents.state import AgentState
+from backend.app.core.security.rbac import Permission
 from backend.app.memory.session import build_context_messages
 from backend.app.memory.summarizer import needs_summarization, summarize_oldest
 from backend.app.observability.events import ActivityEvent, ActivityEventType
+from backend.app.tools.registry import ToolSpec
 
 logger = structlog.get_logger(__name__)
 
-_SYSTEM_PROMPT = (
+_SYSTEM_PROMPT_TEMPLATE = (
     "You are the routing supervisor for an internal AI assistant at a commercial bank. Decide "
     "whether the user's latest message requires searching internal documents (policies, "
-    "incident reports, runbooks, architecture docs, product specs, meeting notes) or can be "
-    "answered directly (greetings, clarifying questions, or general questions needing no "
-    "company-specific evidence). When genuinely uncertain, prefer retrieval — an evidence-backed "
-    "answer is safer than a confident guess."
+    "incident reports, runbooks, architecture docs, product specs, meeting notes) via "
+    "retrieval, can be answered directly (greetings, clarifying questions, or general "
+    "questions needing no company-specific evidence), or is better served by a tool call "
+    "({tool_categories}). When genuinely uncertain between retrieval and direct, prefer "
+    "retrieval — an evidence-backed answer is safer than a confident guess."
 )
+
+# Human-readable gloss for each `Permission` a tool can require, used only to describe *what
+# kinds* of tools exist in the routing prompt — never to decide access, which is entirely
+# `ToolRegistry.available_to`'s and `tools/registry.py::execute`'s job.
+_TOOL_CATEGORY_BY_PERMISSION: dict[Permission, str] = {
+    Permission.SEARCH: "a dedicated internal-document search",
+    Permission.ANALYTICS_TOOLS: "a small Python analysis over data already in the conversation",
+    Permission.MCP_TOOLS: "looking up an employee, a service, or an incident record by id or name",
+}
+
+
+def _available_tool_categories(specs: list[ToolSpec]) -> str:
+    """De-duplicated, role-filtered tool categories for the routing prompt — e.g. an Analyst
+    sees all three, a Viewer sees none and the `"tools"` route effectively never applies to
+    them, without the prompt needing an explicit role branch to say so."""
+    permissions_offered = {spec.required_permission for spec in specs}
+    categories = [
+        text
+        for permission, text in _TOOL_CATEGORY_BY_PERMISSION.items()
+        if permission in permissions_offered
+    ]
+    return "; ".join(categories) if categories else "no tools are available for this request"
 
 
 class RoutingDecision(BaseModel):
@@ -55,7 +92,7 @@ class RoutingDecision(BaseModel):
     reasoning: str = Field(
         description="One sentence of reasoning about what this question needs, written before deciding the route."
     )
-    route: Literal["retrieval", "direct"] = Field(
+    route: Literal["retrieval", "direct", "tools"] = Field(
         description="Where to send this turn next, consistent with the reasoning above."
     )
 
@@ -96,8 +133,13 @@ async def supervisor_node(state: AgentState, runtime: Runtime[GraphContext]) -> 
     else:
         remove = []
 
+    principal = principal_from_state(state)
+    available_specs = runtime.context.tool_registry.available_to(principal)
+    system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
+        tool_categories=_available_tool_categories(available_specs)
+    )
     context_messages = build_context_messages(
-        system_prompt=_SYSTEM_PROMPT, summary=summary, recent_messages=recent_messages
+        system_prompt=system_prompt, summary=summary, recent_messages=recent_messages
     )
     decision = await runtime.context.llm.astructured(
         context_messages, schema=RoutingDecision, reasoning=False

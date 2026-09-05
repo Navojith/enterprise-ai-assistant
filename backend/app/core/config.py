@@ -124,6 +124,38 @@ class Settings(BaseSettings):
     rate_limit_capacity: int = Field(default=20, gt=0)
     rate_limit_refill_per_sec: float = Field(default=0.5, gt=0)
 
+    # --- MCP server + client (Cycle 4) ---
+    # The MCP server is a second local process (`python -m mcp_server`, docs/SETUP.md step 4)
+    # speaking Streamable HTTP — the transport `mcp.server.mcpserver.MCPServer.run()` actually
+    # supports in the installed SDK (see docs/ASSUMPTIONS_AND_TRADEOFFS.md assumption 7 on why
+    # this is `MCPServer`, not the `FastMCP` name `docs/ARCHITECTURE.md`'s shorthand suggests).
+    # Read by both sides so the client's URL and the server's bind address can never drift
+    # apart, the same pattern `docker-compose.yml` uses for Postgres. Port 8100, not 8000,
+    # because the FastAPI backend already owns 8000.
+    mcp_server_host: str = "127.0.0.1"
+    mcp_server_port: int = Field(default=8100, gt=0, le=65535)
+    mcp_server_path: str = "/mcp"
+    # Connecting to a down MCP server and calling one of its tools are different failure modes
+    # (docs/ARCHITECTURE.md: "MCP server down -> tool marked unavailable, supervisor routes
+    # around it") and so get separate budgets — a slow individual tool call should not be
+    # mistaken for the server being unreachable at all, or vice versa.
+    mcp_connect_timeout_seconds: float = Field(default=5.0, gt=0)
+    mcp_call_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    @property
+    def mcp_server_url(self) -> str:
+        """The single URL both `mcp_server/__main__.py` (what it binds) and
+        `tools/mcp_client.py` (what it connects to) derive from these same three settings."""
+        return f"http://{self.mcp_server_host}:{self.mcp_server_port}{self.mcp_server_path}"
+
+    # --- Tools (Cycle 4) ---
+    # Wall-clock budget for one `python_analysis` sandbox execution (`rlm/sandbox.py`). Enforced
+    # with `asyncio.wait_for` around a thread, not a subprocess — this project's Windows event
+    # loop is pinned to `SelectorEventLoop` (docs/ASSUMPTIONS_AND_TRADEOFFS.md trade-off 8),
+    # which cannot spawn subprocesses, so subprocess-level sandbox isolation is not an option
+    # here; see `rlm/sandbox.py`'s module docstring for what that does and does not protect against.
+    sandbox_timeout_seconds: float = Field(default=5.0, gt=0)
+
     @field_validator("rerank_monthly_budget")
     @classmethod
     def _budget_below_free_tier_ceiling(cls, value: int) -> int:

@@ -11,7 +11,7 @@
 
 ## Current state
 
-**Cycles 0 through 3 are done.** Cycle 0's scaffold, config, logging, errors, app factory and
+**Cycles 0 through 4 are done.** Cycle 0's scaffold, config, logging, errors, app factory and
 health checks are built and verified against real Postgres. Cycle 1's corpus (64 documents, 224
 chunks), hybrid retrieval, and reranking are built and verified against a **real, live Pinecone
 Starter account**. Cycle 2's static user store, JWT issue/verify, the `Principal`/role→permission
@@ -31,9 +31,32 @@ demo's own example question). **LangSmith tracing itself is not wired yet** — 
 to authenticate, but `observability/langsmith.py` is a Cycle 7 deliverable; Cycle 3's graph was
 verified via its own `ActivityEvent` stream, not via LangSmith traces.
 
-**Next action:** start **Cycle 4 — Tools and RBAC enforcement** (`tools/registry.py`,
-`knowledge_search`, `python_analysis`, the FastMCP server, and the async MCP client). No external
-prerequisites are blocking it — Ollama, Pinecone, LangSmith and Postgres are all already configured.
+Cycle 4 — tools and RBAC enforcement — is built and verified live end to end against the real
+MCP server, real Ollama, real Pinecone, and real Postgres, all four running at once: the
+two-layer `ToolRegistry` (bind-time filtering + an independent execution-boundary re-check),
+`knowledge_search` (wrapping Cycle 1's hybrid search unchanged), `python_analysis` on a new
+AST-allowlisted sandbox (`rlm/sandbox.py`, built a cycle early — `docs/DELIVERY_PLAN.md`'s risk
+register already anticipated this), a real `mcp.server.mcpserver.MCPServer` exposing the
+employee directory / service catalog / incident records over Streamable HTTP, an async
+`MCPClient`, and a new Supervisor `"tools"` route feeding a Tools node into the graph. Live
+verification (not just unit tests) confirmed both RBAC layers end to end: an Analyst's
+`"Use the employee directory tool..."` request routed to `"tools"`, chose `employee_directory`,
+filled its arguments, called the real MCP server, and produced a correctly-cited answer; the
+identical request from a Viewer still routed to `"tools"` but the Tools node's own LLM call
+could not choose `employee_directory` at all — bind-time filtering had only ever offered it
+`knowledge_search` — and it used that instead, exactly as designed. Three real, non-obvious SDK
+findings surfaced building this and are recorded so a future session doesn't rediscover them:
+`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 15 (the `mcp` 2.x SDK renamed `FastMCP` to
+`MCPServer` and vendors its own `httpx2`; `typing.TypedDict` fails at runtime on Python 3.11
+against pydantic v2's schema generation) and trade-off 16 (`asyncio.wait_for` around an
+`AsyncExitStack`-tracked context manager broke `anyio`'s cancel scopes — found, root-caused, and
+fixed before it ever shipped).
+
+**Next action:** start **Cycle 5 — RLM research agent** (`rlm/api.py`, `rlm/planner.py`,
+`rlm/executor.py`, the Research node and its `"research"` route). `rlm/sandbox.py` — the
+highest-risk piece of Cycle 5 per `docs/DELIVERY_PLAN.md`'s risk register — already exists and
+is tested (`tests/rlm/test_sandbox.py`), built a cycle early because `python_analysis` needed it.
+No external prerequisites are blocking Cycle 5.
 
 ---
 
@@ -59,7 +82,7 @@ These are user-side actions. Full instructions in `docs/SETUP.md`.
 | 1 | Corpus and hybrid retrieval | 4h | ✅ done |
 | 2 | Auth, RBAC, rate limiting | 2.5h | ✅ done |
 | 3 | LangGraph core, memory, streaming | 5h | ✅ done |
-| 4 | Tools and RBAC enforcement | 3h | ⬜ pending |
+| 4 | Tools and RBAC enforcement | 3h | ✅ done |
 | 5 | RLM research agent | 4h | ⬜ pending |
 | 6 | Guardrails and validation | 2.5h | ⬜ pending |
 | 7 | Frontend, observability, docs | 4h | ⬜ pending |
@@ -197,17 +220,41 @@ Pinecone or the checkpointer is unreachable at startup (`GraphContext.pinecone_s
 create_app())` would have started failing the moment this cycle's lifespan additions landed,
 since the test environment has no `PINECONE_API_KEY`.
 
-### Cycle 4 — Tools and RBAC enforcement ⬜
+### Cycle 4 — Tools and RBAC enforcement ✅
 
-- [ ] `tools/registry.py` — role filtering at bind time **and** re-check at execution boundary
-- [ ] `knowledge_search` tool
-- [ ] `python_analysis` tool (reuses the Cycle 5 sandbox)
-- [ ] `mcp_server/` — FastMCP: employee directory, service catalog, incident records
-- [ ] Async MCP client with timeout + failure handling
+- [x] `tools/registry.py` — `ToolRegistry.available_to` (bind-time filter) **and**
+      `.execute` (independent execution-boundary re-check, verified live and in
+      `tests/tools/test_registry.py` with a Viewer principal handed straight to `execute(...)`,
+      no LLM or graph involved)
+- [x] `knowledge_search` tool — wraps Cycle 1's `hybrid_search`/`rerank_chunks` unchanged
+- [x] `python_analysis` tool, on a new `rlm/sandbox.py` (AST allowlist + stripped builtins +
+      wall-clock timeout via a worker thread — built this cycle, a cycle ahead of the RLM
+      planner that will reuse it, per `docs/DELIVERY_PLAN.md`'s risk register)
+- [x] `mcp_server/` — `mcp.server.mcpserver.MCPServer` (see `docs/ASSUMPTIONS_AND_TRADEOFFS.md`
+      trade-off 15 for why not `mcp.server.fastmcp.FastMCP`) over Streamable HTTP: employee
+      directory, service catalog, incident records, six tools total, two per dataset
+- [x] Async `MCPClient` with connect/call timeouts (`MCPUnavailableError`/`ToolTimeoutError`) —
+      a real `asyncio.wait_for`/`anyio` cancel-scope bug was found and fixed building this
+      (trade-off 16), verified live: connect, call, and clean shutdown against a real running
+      `mcp_server` process
+- [x] Supervisor `"tools"` route + a new Tools node (`agents/nodes/tools.py`) wiring the
+      registry into the graph — two schema-constrained calls (choose a tool, then fill its
+      parameters), verified live end to end for both an Analyst (reached a real MCP tool) and a
+      Viewer (bind-time filtering left it unable to choose that tool at all, and it used
+      `knowledge_search` instead — no execution-boundary denial even needed for this path)
+- [x] `tests/rlm/test_sandbox.py`, `tests/tools/` (registry, knowledge_search, python_analysis,
+      mcp_client, mcp_tools, factory), `tests/mcp_server/test_server.py`,
+      `tests/agents/nodes/test_tools.py`, `tests/agents/nodes/test_supervisor.py`, plus two new
+      `test_graph.py` cases for the `"tools"` route — 79 new tests (213 total); `ruff`,
+      `ruff format`, `mypy --strict` all pass clean.
 
 ### Cycle 5 — RLM research agent ⬜
 
-- [ ] `rlm/sandbox.py` — AST allowlist, stripped builtins, no imports/dunders/IO, wall-clock timeout
+- [x] `rlm/sandbox.py` — AST allowlist, stripped builtins, no imports/dunders/IO, wall-clock
+      timeout — **built in Cycle 4** (`python_analysis` needed it); nothing left to do here
+- [ ] Re-verify `rlm/sandbox.py` still fits the planner/executor's needs unchanged before
+      building on top of it — it was designed for a single tool call, not yet exercised under
+      recursive sub-agent fan-out
 - [ ] `rlm/api.py` — `search` / `filter` / `batch` / `sub_agent` / `aggregate`
 - [ ] `rlm/planner.py` — schema-constrained Python plan generation
 - [ ] `rlm/executor.py` — recursion depth + fan-out caps, bounded semaphore
@@ -251,6 +298,39 @@ From `ASSESSMENT.md`. Tracked separately because these are graded independently 
 
 Newest first. One line per meaningful change.
 
+- **2026-09-05** — Built and verified Cycle 4 (tools and RBAC enforcement) live end to end
+  against a real `mcp_server` process, real Ollama, real Pinecone, and real Postgres running
+  together. Verified the `mcp==2.1.1` SDK by importing the installed package rather than
+  assumed from its 1.x shape (same discipline as Cycle 1's Pinecone v10 verification) — the
+  server class is `mcp.server.mcpserver.MCPServer`, not `mcp.server.fastmcp.FastMCP`, which
+  raises on import in 2.x with a message pointing at a migration guide; the SDK also vendors its
+  own HTTP client as a separate `httpx2` package, distinct from this project's own pinned
+  `httpx`. Found two further issues only by running real code, not by `ruff`/`mypy` (both passed
+  clean the whole time): `mcp_server/data.py`'s `TypedDict`s needed to come from
+  `typing_extensions`, not `typing`, because pydantic v2's schema generation for a `TypedDict`
+  return annotation requires that on Python 3.11; and `MCPClient.connect()` wrapping
+  `AsyncExitStack.enter_async_context(streamable_http_client(...))` in `asyncio.wait_for` broke
+  `anyio`'s cancel-scope task affinity, raising `RuntimeError` the first time `aclose()` ran
+  afterward — root-caused to `wait_for` wrapping its argument in a new child `Task`, fixed by
+  never wrapping a stack-tracked context-manager entry in `wait_for` when its exit happens later
+  elsewhere (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-offs 15–16 record both in full). Built
+  `rlm/sandbox.py` a cycle early, since `python_analysis` needed it and `docs/DELIVERY_PLAN.md`'s
+  risk register already named the sandbox as "the thing to build first" if Cycle 5 slipped.
+  Wired a new Supervisor `"tools"` route and Tools node into the Cycle 3 graph (two
+  schema-constrained calls: choose a tool from what this principal's role offers, then fill its
+  parameters) rather than leaving the registry unreachable from the graph until Cycle 5 — this is
+  what let `docs/DELIVERY_PLAN.md`'s acceptance criterion 3 be verified as a real conversation,
+  not only a direct `registry.execute()` unit test: an Analyst's "Use the employee directory
+  tool..." request routed to `"tools"`, called the real MCP server, and produced a correctly
+  cited answer (one run of this also hit `LLM_REQUEST_TIMEOUT_SECONDS`'s 30s default on the
+  argument-filling call and degraded to a clean typed error event rather than hanging or
+  crashing — an immediate retry completed in ~20s, treated as expected hardware variance, not a
+  bug); the identical request from a Viewer still routed to `"tools"` but its own tool-choice
+  call could not select `employee_directory` at all, since bind-time filtering had only ever
+  offered it `knowledge_search` — proving the two-layer authorization model
+  (`tools/registry.py`'s module docstring) holds at the bind-time layer without ever reaching
+  the execution-boundary check for this path. 79 new tests (213 total); `ruff`, `ruff format`,
+  `mypy --strict` all pass clean.
 - **2026-09-05** — Built and verified Cycle 3 (LangGraph core, memory, streaming) end to end
   against real Ollama, Pinecone, and Postgres. Before starting, verified the two external
   prerequisites live rather than assuming success from installation alone: the user's first

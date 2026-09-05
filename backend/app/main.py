@@ -6,7 +6,8 @@ exception hierarchy, and the liveness/readiness health check. Cycle 3 adds the r
 `AsyncPostgresSaver` checkpointer pool, and the compiled LangGraph graph — stored on `app.state`
 because, unlike every other cached-factory singleton in this codebase (`get_settings`,
 `get_engine`, `get_pinecone_store`), building them requires `await`, which a plain `lru_cache`
-factory cannot do. Cycle 4 extends this further to start the MCP client session.
+factory cannot do. Cycle 4 extends this further with the MCP client session and the
+RBAC-aware tool registry built from it.
 """
 
 from __future__ import annotations
@@ -41,6 +42,8 @@ from backend.app.core.logging import (
 from backend.app.llm.chain import FallbackChain
 from backend.app.llm.ollama_provider import OllamaProvider
 from backend.app.retrieval.pinecone_store import PineconeStore, get_pinecone_store
+from backend.app.tools.factory import build_default_registry
+from backend.app.tools.mcp_client import MCPClient
 
 logger = get_logger(__name__)
 
@@ -60,6 +63,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await create_all_tables()
     except Exception:
         logger.warning("startup_table_creation_failed", exc_info=True)
+
+    # Cycle 4's MCP client: one long-lived session (`tools/mcp_client.py`'s module docstring on
+    # why not one per call), degrading to `None` on failure the same way `pinecone_store` below
+    # does — `tools/factory.py::build_default_registry` then simply omits the MCP-backed tools,
+    # and the Supervisor's routing prompt (`agents/nodes/supervisor.py`) never offers a category
+    # the registry has nothing behind, matching `docs/ARCHITECTURE.md`'s "MCP server down -> tool
+    # marked unavailable, supervisor routes around it".
+    mcp_client: MCPClient | None
+    mcp_client = MCPClient(
+        settings.mcp_server_url,
+        connect_timeout_seconds=settings.mcp_connect_timeout_seconds,
+        call_timeout_seconds=settings.mcp_call_timeout_seconds,
+    )
+    try:
+        await mcp_client.connect()
+    except Exception:
+        logger.warning("startup_mcp_unavailable", exc_info=True)
+        mcp_client = None
 
     # Cycle 1's Pinecone client, initialized once here rather than lazily on first request, so a
     # missing/unreachable index surfaces at startup logs instead of on a user's first turn. Both
@@ -120,8 +141,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         checkpointer = AsyncPostgresSaver(checkpoint_pool)
         await asyncio.wait_for(checkpointer.setup(), timeout=_CHECKPOINTER_STARTUP_TIMEOUT_SECONDS)
+        tool_registry = build_default_registry(
+            pinecone_store=pinecone_store, mcp_client=mcp_client, settings=settings
+        )
         app.state.graph_context = GraphContext(
-            llm=llm_provider, pinecone_store=pinecone_store, settings=settings
+            llm=llm_provider,
+            pinecone_store=pinecone_store,
+            settings=settings,
+            tool_registry=tool_registry,
         )
         app.state.graph = build_graph(
             checkpointer, max_validator_retries=settings.max_validator_retries
@@ -129,11 +156,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.warning("startup_graph_unavailable", exc_info=True)
 
-    # Cycle 4: start the MCP client session.
     yield
 
     if checkpoint_pool is not None:
         await checkpoint_pool.close()
+    if mcp_client is not None:
+        await mcp_client.aclose()
     logger.info("shutdown")
 
 

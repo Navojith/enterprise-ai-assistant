@@ -96,6 +96,10 @@ committed and must stay in sync whenever a variable is added.
 | `RERANK_MONTHLY_BUDGET` | Hard cutoff, default below 500 |
 | `RATE_LIMIT_CAPACITY` | Token-bucket capacity per user |
 | `RATE_LIMIT_REFILL_PER_SEC` | Token-bucket refill rate |
+| `MCP_SERVER_HOST` / `MCP_SERVER_PORT` / `MCP_SERVER_PATH` | Where `python -m mcp_server` binds and where `tools/mcp_client.py` connects — same three settings on both sides |
+| `MCP_CONNECT_TIMEOUT_SECONDS` | How long the client waits for the MCP server to become reachable |
+| `MCP_CALL_TIMEOUT_SECONDS` | Per-tool-call timeout once connected |
+| `SANDBOX_TIMEOUT_SECONDS` | Wall-clock budget for one `python_analysis` sandbox execution |
 | `LOG_LEVEL` | Default `INFO` |
 
 ---

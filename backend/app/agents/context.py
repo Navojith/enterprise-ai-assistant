@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from backend.app.core.config import Settings
 from backend.app.llm.provider import LLMProvider
 from backend.app.retrieval.pinecone_store import PineconeStore
+from backend.app.tools.registry import ToolRegistry
 
 
 @dataclass
@@ -25,3 +26,8 @@ class GraphContext:
     # `VectorStoreUnavailableError`: continue with no evidence rather than fail the turn.
     pinecone_store: PineconeStore | None
     settings: Settings
+    # Built once by `tools/factory.py::build_default_registry` from whatever `pinecone_store`
+    # and MCP connectivity turned out to be at startup — never `None` itself, since a registry
+    # with zero MCP/knowledge-search tools (both dependencies down) is still a valid, empty
+    # registry, not a missing one; `agents/nodes/tools.py` only ever asks it what is available.
+    tool_registry: ToolRegistry

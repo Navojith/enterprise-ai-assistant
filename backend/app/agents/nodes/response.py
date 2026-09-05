@@ -59,6 +59,13 @@ async def response_node(state: AgentState, runtime: Runtime[GraphContext]) -> di
     chunks = state.get("retrieved_chunks", [])
     system_prompt = f"{_SYSTEM_PROMPT}\n\nEvidence:\n{_format_evidence(chunks)}"
 
+    tool_output = state.get("tool_output")
+    if tool_output:
+        # Set only on the `"tools"` route (`agents/nodes/tools.py`) — folded in exactly like
+        # retrieved evidence, including when it is an explanation of a denied or failed tool
+        # call, so the model relays that to the user instead of fabricating an answer around it.
+        system_prompt += f"\n\nTool result:\n{tool_output}"
+
     feedback = state.get("validation_feedback")
     if feedback:
         system_prompt += (

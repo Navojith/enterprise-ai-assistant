@@ -39,10 +39,11 @@ rather than left implicit, so the reasoning can be examined and challenged.
    directly. This held up under the Windows event-loop finding in trade-off 8 below — see
    `backend/app/core/loop.py`.
 
-7. **The MCP server (Cycle 4) is built on the official `mcp` SDK's built-in FastMCP**
-   (`mcp.server.fastmcp.FastMCP`), not the standalone third-party `fastmcp` package that
-   `docs/ARCHITECTURE.md`'s shorthand name could also mean. `requirements.txt` pins to `mcp`
-   specifically so this is a Cycle-0 commitment, not something Cycle 4 has to decide later.
+7. **The MCP server (Cycle 4) is built on the official `mcp` SDK**, not the standalone
+   third-party `fastmcp` package that `docs/ARCHITECTURE.md`'s shorthand name could also mean.
+   `requirements.txt` pins to `mcp` specifically so this is a Cycle-0 commitment, not something
+   Cycle 4 has to decide later. The exact class turned out to differ from what was assumed when
+   this line was first written — see trade-off 15.
 
 ---
 
@@ -282,10 +283,76 @@ enforces — worth a lint rule or schema convention if a future cycle adds many 
 
 ---
 
+### 15. The `mcp` SDK's actual surface, verified by importing the installed 2.1.1 package, not recalled
+
+**Why this needed checking:** `mcp==2.1.1` is a major version past the `mcp.server.fastmcp.
+FastMCP` shape most training data and public examples describe (the same category of trap as
+trade-off 11's Pinecone v10 SDK) — importing `mcp.server.fastmcp` in this install raises
+`ModuleNotFoundError` on purpose, with a message pointing at a migration guide: the server class
+was renamed and moved to `mcp.server.mcpserver.MCPServer` in the 2.x line. `mcp_server/server.py`
+is built against that real class, its actual `.tool()`/`.run()` signatures (`run(transport=
+"stdio"|"sse"|"streamable-http", ...)`, `host`/`port`/`streamable_http_path` kwargs for the
+last), inspected directly via `inspect.signature` before writing a line against it.
+
+**A second, independent surprise found the same way:** the SDK vendors its own HTTP client as a
+separate top-level package, `httpx2` (a distinct distribution, currently 2.12.0 — not an alias
+for this project's own pinned `httpx==0.28.1`). `tools/mcp_client.py` never imports `httpx2`
+directly precisely because of this — see trade-off 16 for why, and what that costs.
+
+**A third finding, this time from running the server's own tests, not from reading source:**
+`mcp_server/data.py`'s `Employee`/`Service`/`IncidentRecord` are declared with
+`typing_extensions.TypedDict`, not `typing.TypedDict` — on Python 3.11 (this project's pinned
+version), pydantic v2's schema generation (which `MCPServer.tool()` uses to build a tool's
+structured-output schema from its return annotation) raises `PydanticUserError` at decoration
+time against a stdlib `TypedDict`, because it lacks metadata pydantic needs that only exists on
+Python 3.12+. `mypy` and `ruff` both pass against the stdlib version — this only fails the
+moment `mcp_server/server.py`'s `@server.tool()` decorators actually execute, which is exactly
+why `tests/mcp_server/test_server.py` exists rather than trusting static checks alone.
+
+### 16. `asyncio.wait_for` around an `AsyncExitStack`-tracked context manager broke `anyio` cancel scopes
+
+**Found while testing `MCPClient.connect()` against an unreachable server** (`tests/tools/
+test_mcp_client.py`): the first `aclose()` after a failed connect raised `RuntimeError:
+Attempted to exit cancel scope in a different task than it was entered in` — not the
+`MCPUnavailableError` the test expected.
+
+**Root cause:** `asyncio.wait_for` wraps its argument in a new child `Task` (so it can cancel
+that awaitable independently of the caller) if it is not already one. The original code wrapped
+`self._stack.enter_async_context(streamable_http_client(...))` in `wait_for` to bound the
+connect attempt — but `streamable_http_client` opens an `anyio` cancel scope as part of
+entering, and `anyio` cancel scopes are strictly tied to the specific `asyncio.Task` that opened
+them. Wrapped in `wait_for`, that scope opens inside the short-lived child task; the matching
+exit happens later, from `aclose()`, in `MCPClient`'s own owning task — a mismatch `anyio`
+detects and refuses, every time, not only under real network failure.
+
+**Fix:** `connect()` no longer wraps the `enter_async_context` call in `wait_for` at all — only
+`session.initialize()` (a plain coroutine with no context-manager exit for the stack to mismatch
+later) is timeout-bounded. The practical consequence: `mcp_connect_timeout_seconds` now bounds
+the initialize handshake precisely, while the underlying TCP-connect phase relies on the
+transport's own default (`mcp.shared._httpx_utils.create_mcp_http_client`'s documented 30s
+connect/write/pool timeout) — an outright connection refusal (the unreachable-server case this
+was found under) still fails immediately regardless, since TCP refusal does not wait for any
+timeout. Tightening the connect phase further would mean constructing a custom `httpx2.
+AsyncClient` (trade-off 15) and passing it as `streamable_http_client`'s `http_client=` — reaching
+past a dependency's documented surface for a requirement `ASSESSMENT.md` itself calls "not a
+high priority requirement," which is not a trade worth making here.
+
+**Why this generalizes:** never wrap `AsyncExitStack.enter_async_context(...)` in
+`asyncio.wait_for` (or anything else that runs it in a different task) when the matching
+`aclose()`/`__aexit__` will happen later, elsewhere, off the stack — this applies to any future
+`anyio`-based async context manager added to this codebase, not just this one.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see
-  trade-off 13. Still dominated by local inference on a 4 GB GPU, not by the architecture.
+  trade-off 13. Still dominated by local inference on a 4 GB GPU, not by the architecture. The
+  `"tools"` route (Cycle 4) costs two more sequential LLM calls than `"retrieval"` or `"direct"`
+  (choose a tool, then fill its arguments, on top of the Supervisor and Response calls every
+  route already pays) — verified live: one run hit `LLM_REQUEST_TIMEOUT_SECONDS`'s 30s default
+  on the argument-filling call and degraded cleanly to a typed `error` event on the stream
+  (`api/v1/chat.py`'s existing LLM-failure handling, unchanged by this cycle); an immediate retry
+  of the identical question completed in ~20s end to end. Treated as expected variance on this
+  hardware, not a bug — `docs/DECISIONS.md` §3 already prices in 8–15 calls per question.
 - **Answer quality is model-bound**, not design-bound. See trade-off 1.
 - **Synthetic corpus** means retrieval quality is not validated against real enterprise documents.
 - **No evaluation harness.** There is no automated answer-quality benchmark; correctness is verified

@@ -43,10 +43,17 @@ tenacity==9.1.4
 pinecone==10.0.0
 
 # --- MCP server + client (Cycle 4) ---
-# Official SDK's built-in FastMCP (mcp.server.fastmcp), not the standalone third-party
-# "fastmcp" package — see docs/ASSUMPTIONS_AND_TRADEOFFS.md.
+# Official SDK, not the standalone third-party "fastmcp" package. In this 2.x release the
+# server class is `mcp.server.mcpserver.MCPServer` — `mcp.server.fastmcp.FastMCP` (the 1.x
+# name docs/ARCHITECTURE.md's "FastMCP" shorthand could suggest) is a renamed stub in 2.x that
+# raises on import — see docs/ASSUMPTIONS_AND_TRADEOFFS.md.
 mcp==2.1.1
 httpx==0.28.1
+# `typing_extensions.TypedDict`, not `typing.TypedDict` — required by pydantic v2's schema
+# generation for a TypedDict return annotation on Python < 3.12 (mcp_server/data.py). Already an
+# indirect dependency via pydantic; pinned explicitly because this project's own code imports it
+# directly now, not just transitively.
+typing_extensions==4.16.0
 
 # --- Frontend (Cycle 7) ---
 streamlit==1.63.0

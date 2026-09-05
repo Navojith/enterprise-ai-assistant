@@ -62,11 +62,21 @@ class AgentState(TypedDict, total=False):
     summary: str
 
     # Supervisor's routing decision. `"direct"` skips retrieval entirely (greetings, questions
-    # answerable without evidence); `"retrieval"` is the only other route until Cycle 5 adds
-    # `"research"` for the RLM path and Cycle 4 adds tool-calling.
-    route: Literal["retrieval", "direct"]
+    # answerable without evidence); `"retrieval"` is single-hop RAG; `"tools"` (Cycle 4) sends
+    # the turn to a specific RBAC-gated tool (knowledge search, Python analysis, or an MCP
+    # lookup) instead of the always-on retrieval path — for a request that names a specific
+    # lookup (an employee, a service, an incident id) rather than an open-ended question.
+    # Cycle 5 adds `"research"` for the RLM path.
+    route: Literal["retrieval", "direct", "tools"]
 
     retrieved_chunks: Annotated[list[RetrievedChunk], merge_retrieved_chunks]
+
+    # The Tools node's result for this turn, folded into the Response node's context exactly
+    # like retrieved evidence. `None` when no tool ran (every route but `"tools"`) or when the
+    # tool call was denied or failed — in both of those cases this still carries a
+    # human-readable explanation, never a silent gap, so the Response node can tell the user
+    # what happened rather than fabricating an answer around a missing result.
+    tool_output: str | None
 
     # The Response node's latest draft, re-written on every Validator -> Response retry.
     draft_answer: str
