@@ -1,0 +1,52 @@
+# Runtime dependencies for the whole build, grouped by the delivery cycle that first needs
+# them (docs/DELIVERY_PLAN.md) so later cycles never have to touch this file. Versions are
+# exact pins, taken from the latest release on PyPI as of 2026-09-05 (see
+# docs/ASSUMPTIONS_AND_TRADEOFFS.md) rather than loose ranges, because a multi-agent graph
+# depends on several fast-moving libraries whose behaviour has changed across minor versions.
+
+# --- Web framework & server (Cycle 0) ---
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-dotenv==1.2.3
+
+# --- Structured logging (Cycle 0) ---
+structlog==26.1.0
+
+# --- Postgres (Cycle 0 infra; consumed from Cycle 2 onward) ---
+# One driver — psycopg (v3, async) — used directly by langgraph-checkpoint-postgres and via
+# SQLAlchemy's async "postgresql+psycopg" dialect for the app's own tables (rate-limit state,
+# rerank budget counter). See docs/ASSUMPTIONS_AND_TRADEOFFS.md for why asyncpg was dropped.
+psycopg[binary,pool]==3.3.5
+sqlalchemy==2.0.52
+
+# --- Auth (Cycle 2) ---
+pyjwt==2.13.0
+bcrypt==5.0.0
+
+# --- LangGraph / LangChain orchestration (Cycle 3) ---
+langgraph==1.2.11
+langgraph-checkpoint-postgres==3.1.2
+langchain-core==1.6.2
+langchain-text-splitters==1.1.2
+langchain-ollama==1.1.0
+
+# --- Observability — LangSmith tracing is mandatory per ASSESSMENT.md (Cycle 3/7) ---
+langsmith==0.12.1
+
+# --- Resilience: LLM fallback chain, retries (Cycle 3) ---
+tenacity==9.1.4
+
+# --- Vector database (Cycle 1) ---
+# v10 ships async support (httpx/anyio-based) with no extra install needed.
+pinecone==10.0.0
+
+# --- MCP server + client (Cycle 4) ---
+# Official SDK's built-in FastMCP (mcp.server.fastmcp), not the standalone third-party
+# "fastmcp" package — see docs/ASSUMPTIONS_AND_TRADEOFFS.md.
+mcp==2.1.1
+httpx==0.28.1
+
+# --- Frontend (Cycle 7) ---
+streamlit==1.63.0

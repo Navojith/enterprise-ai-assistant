@@ -11,12 +11,14 @@
 
 ## Current state
 
-**Nothing is implemented yet.** The repository contains the assessment brief, this documentation
-set, and no application code. All architecture and tooling decisions are made and recorded in
-`docs/DECISIONS.md`; the build is sequenced into 8 cycles in `docs/DELIVERY_PLAN.md`.
+**Cycle 0 is done.** The scaffold, config, structured logging, the exception hierarchy, the app
+factory, and the liveness/readiness health check are built, and were verified end to end against a
+real Postgres container (not just linted) — see the Cycle 0 checklist below and the session log for
+what that verification found. Cycle 1 needs Pinecone credentials before it can start; see "Blocked on"
+below.
 
-**Next action:** run **Cycle 0 — Foundation scaffold** (see checklist below). Cycle 0 needs no
-external accounts and is not blocked by anything.
+**Next action:** get a Pinecone Starter API key (no payment method attached; see `docs/SETUP.md`),
+then start **Cycle 1 — Corpus and hybrid retrieval**.
 
 ---
 
@@ -38,7 +40,7 @@ Full instructions in `docs/SETUP.md`.
 
 | # | Cycle | Est. | Status |
 | --- | --- | --- | --- |
-| 0 | Foundation scaffold | 2h | ⬜ pending |
+| 0 | Foundation scaffold | 2h | ✅ done |
 | 1 | Corpus and hybrid retrieval | 4h | ⬜ pending |
 | 2 | Auth, RBAC, rate limiting | 2.5h | ⬜ pending |
 | 3 | LangGraph core, memory, streaming | 5h | ⬜ pending |
@@ -56,19 +58,22 @@ Legend: ⬜ pending · 🟡 in progress · ✅ done
 Tick each component as it lands, so a context-wiped session can tell **how far into** a cycle the
 work got — not merely whether the cycle started.
 
-### Cycle 0 — Foundation scaffold ⬜
+### Cycle 0 — Foundation scaffold ✅
 
-- [ ] Directory structure (`backend/app/...`, `mcp_server/`, `frontend/`, `data/`, `scripts/`, `tests/`)
-- [ ] `requirements.txt` (+ `requirements-dev.txt`)
-- [ ] `.env.example` with every variable
-- [ ] `pyproject.toml` — ruff, mypy, pytest configuration
-- [ ] `backend/app/core/config.py` — pydantic-settings
-- [ ] `backend/app/core/logging.py` — structlog JSON + correlation IDs
-- [ ] `backend/app/core/errors.py` — exception hierarchy + FastAPI handlers
-- [ ] `backend/app/main.py` — app factory + lifespan
-- [ ] `backend/app/api/v1/health.py` — liveness/readiness
-- [ ] `docker-compose.yml` — Postgres only
-- [ ] `CLAUDE.md` dev-commands section filled in with real commands
+- [x] Directory structure (`backend/app/...`, `mcp_server/`, `frontend/`, `data/`, `scripts/`, `tests/`)
+      — future-cycle packages exist as `__init__.py` stubs naming the cycle that fills them in.
+- [x] `requirements.txt` (+ `requirements-dev.txt`) — exact pins for the whole build, grouped by cycle.
+- [x] `.env.example` with every variable
+- [x] `pyproject.toml` — ruff, mypy (strict), pytest configuration
+- [x] `backend/app/core/config.py` — pydantic-settings; enforces the rerank-budget cost guard in code
+- [x] `backend/app/core/logging.py` — structlog JSON (console in dev) + correlation IDs
+- [x] `backend/app/core/errors.py` — exception hierarchy + FastAPI handlers
+- [x] `backend/app/main.py` — app factory + lifespan
+- [x] `backend/app/api/v1/health.py` — liveness/readiness (readiness pings Postgres)
+- [x] `docker-compose.yml` — Postgres only
+- [x] `CLAUDE.md` dev-commands section filled in with real commands
+- [x] `tests/` — 12 tests covering the rerank-budget validator, the exception→JSON envelope
+      mapping, and both readiness branches; `pytest`/`ruff`/`mypy --strict` all pass clean.
 
 ### Cycle 1 — Corpus and hybrid retrieval ⬜
 
@@ -156,6 +161,14 @@ From `ASSESSMENT.md`. Tracked separately because these are graded independently 
 
 Newest first. One line per meaningful change.
 
+- **2026-09-05** — Built and verified Cycle 0 (scaffold, config, structured logging, exception
+  hierarchy, app factory, health endpoints, `docker-compose.yml`, 12 passing tests). Verification
+  against a real Postgres container surfaced two environment-specific findings, both fixed and
+  recorded in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-offs 8–9: psycopg's async mode cannot run
+  on Windows' default `ProactorEventLoop` (fixed with an explicit uvicorn `--loop` factory in
+  `backend/app/core/loop.py`, since the bug was otherwise masked by `--reload` and would have
+  resurfaced at the worst time); and a pre-existing native Postgres service on this machine was
+  shadowing the Docker container on the default port 5432 (fixed by publishing on 5433 instead).
 - **2026-09-05** — Created the documentation set (`PROGRESS`, `DECISIONS`, `ARCHITECTURE`,
   `DELIVERY_PLAN`, `SETUP`, `ASSUMPTIONS_AND_TRADEOFFS`, `README`, `.gitignore`) and rewrote
   `CLAUDE.md` as the context-wipe recovery entry point. No application code yet.

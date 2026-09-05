@@ -1,0 +1,27 @@
+# Postgres only — the backend, MCP server and Streamlit frontend run natively against it.
+# Full containerization was a bonus item, deliberately not selected; see docs/DECISIONS.md §7.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: enterprise-ai-assistant-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: enterprise_ai_assistant
+    ports:
+      # Host-side 5433, not the Postgres default 5432: a dev machine commonly already runs a
+      # native Postgres service on 5432, which silently shadows this container on Windows
+      # (same loopback address, first bind wins) and produces confusing auth failures against
+      # someone else's database rather than a connection-refused. See docs/SETUP.md.
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d enterprise_ai_assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:

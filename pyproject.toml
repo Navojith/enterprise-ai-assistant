@@ -1,0 +1,58 @@
+[project]
+name = "enterprise-ai-assistant"
+version = "0.1.0"
+description = "Enterprise AI assistant: LangGraph multi-agent RAG with RBAC, hybrid retrieval, and an RLM research agent."
+requires-python = ">=3.11,<3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["data/seed"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "W",     # pycodestyle warnings
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "SIM",   # flake8-simplify
+    "ASYNC", # flake8-async (blocking calls in async def, etc.)
+    "BLE",   # flake8-blind-except
+    "RUF",   # ruff-specific rules
+]
+# E501 (line too long) is left to `ruff format`, which wraps what it safely can; a hard lint
+# failure on the rest (long URLs, long strings) would fight the formatter rather than help.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["backend", "scripts", "mcp_server"]
+
+# FastAPI's `Depends(...)` in a parameter default is the framework's documented DI pattern —
+# it is evaluated once per request by FastAPI itself, not once at import time like the mutable-
+# default-argument bug B008 exists to catch. Whitelist it instead of silencing the rule.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.params.Depends"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["backend", "scripts", "mcp_server", "tests"]
+strict = true
+plugins = ["pydantic.mypy"]
+
+# Streamlit's stubs are incomplete; everything else in the stack ships its own types.
+[[tool.mypy.overrides]]
+module = ["streamlit.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-markers --strict-config"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -50,8 +50,37 @@ Do not violate these without an explicit decision recorded in `docs/DECISIONS.md
 
 ## Development commands
 
-> Not yet available — Cycle 0 creates the scaffold. Update this section when it lands.
-> Run commands in the meantime are in `docs/SETUP.md`.
+Install (see `docs/SETUP.md` for prerequisites):
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+pip install -r requirements-dev.txt   # includes requirements.txt
+```
+
+Lint, format, type-check:
+
+```bash
+ruff check .
+ruff format .
+mypy
+```
+
+Test:
+
+```bash
+pytest
+```
+
+Run the backend (see `docs/SETUP.md` for the full multi-process order, required accounts, and
+why `--loop` is required on Windows):
+
+```bash
+docker compose up -d postgres
+uvicorn backend.app.main:app --reload --port 8000 --loop backend.app.core.loop:selector_loop_factory
+```
+
+Health check once it is up: `curl http://localhost:8000/api/v1/health/live`.
 
 @ASSESSMENT.md
 
