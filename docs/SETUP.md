@@ -61,11 +61,22 @@ containerized; the backend, frontend and MCP server run natively.
 
 Python 3.11 (3.11.5 verified on the development machine).
 
+### 6. JWT signing secret (Cycle 2)
+
+No external account — generate a random secret and put it in `.env` as `JWT_SECRET_KEY`:
+
+```bash
+openssl rand -hex 32
+```
+
+`core/security/jwt.py` raises `ConfigurationError` at first use if this is left blank, rather
+than signing tokens with a predictable default.
+
 ---
 
 ## Environment variables
 
-Copy `.env.example` to `.env` and fill in the three keys. `.env` is gitignored; `.env.example` is
+Copy `.env.example` to `.env` and fill in the keys below. `.env` is gitignored; `.env.example` is
 committed and must stay in sync whenever a variable is added.
 
 | Variable | Purpose |
@@ -134,14 +145,23 @@ The UI is then at <http://localhost:8501> and the API at <http://localhost:8000>
 
 ## Demo users
 
-Static credentials for the three RBAC roles. Defined in the user store; see `docs/DECISIONS.md` §2
-for why hardcoded users were chosen over Keycloak.
+Static credentials for the three RBAC roles, defined in `backend/app/core/security/users.py`.
+See `docs/DECISIONS.md`'s Auth row for why hardcoded users were chosen over Keycloak. Get a token with:
 
-| Role | Allowed |
-| --- | --- |
-| **Viewer** | Chat and search only — no administrative or analytics tools |
-| **Analyst** | Search, analytics tools, MCP tools |
-| **Administrator** | All tools |
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "viewer", "password": "ViewerPass123!"}'
+```
+
+Send it as `Authorization: Bearer <access_token>` on subsequent requests; `GET /api/v1/auth/me`
+returns the resolved `{username, role}` and is a quick way to confirm a token works.
+
+| Username | Password | Role | Allowed |
+| --- | --- | --- | --- |
+| `viewer` | `ViewerPass123!` | **Viewer** | Chat and search only — no administrative or analytics tools |
+| `analyst` | `AnalystPass123!` | **Analyst** | Search, analytics tools, MCP tools |
+| `admin` | `AdminPass123!` | **Administrator** | All tools |
 
 ---
 

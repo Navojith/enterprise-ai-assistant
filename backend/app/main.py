@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 
+from backend.app.api.v1.auth import router as auth_router
 from backend.app.api.v1.health import router as health_router
 from backend.app.core.config import get_settings
 from backend.app.core.db import create_all_tables
@@ -93,6 +94,7 @@ def create_app() -> FastAPI:
         return response
 
     app.include_router(health_router, prefix="/api/v1", tags=["health"])
+    app.include_router(auth_router, prefix="/api/v1", tags=["auth"])
 
     return app
 

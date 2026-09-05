@@ -11,19 +11,25 @@
 
 ## Current state
 
-**Cycles 0 and 1 are done.** Cycle 0's scaffold, config, logging, errors, app factory and health
+**Cycles 0, 1 and 2 are done.** Cycle 0's scaffold, config, logging, errors, app factory and health
 checks are built and verified against real Postgres. Cycle 1's corpus (64 documents, 224 chunks),
 hybrid retrieval, and reranking are built and verified against a **real, live Pinecone Starter
 account** — indexes created, all 224 chunks ingested into both the dense and sparse indexes across
 6 namespaces, idempotency confirmed (a second `python -m scripts.ingest` run re-embeds zero chunks),
 RBAC access-level filtering confirmed across roles, and reranking confirmed end to end including its
-Postgres-backed budget counter. See the Cycle 1 checklist below and the session log for what that
-verification found and fixed.
+Postgres-backed budget counter. Cycle 2's static user store, JWT issue/verify, the
+`Principal`/role→permission matrix, FastAPI dependency wiring, and the Postgres-backed token-bucket
+rate limiter are built and verified against a real, live Postgres container end to end — login for
+all three roles, `GET /api/v1/auth/me` resolving a bearer token back to its principal, a
+`require_permission`-gated route returning 403 for a viewer and 200 for an administrator, and 20
+real requests against a `RATE_LIMIT_CAPACITY=20` bucket followed by two real 429s with a correct
+`retry_after_seconds`, confirmed by reading `rate_limit_buckets` directly in Postgres. See the
+Cycle 2 checklist below and the session log for what that verification found.
 
 **Next action:** get a LangSmith Developer API key and install Ollama (`ollama pull qwen3:4b`; no
-payment method / credit card on either — see `docs/SETUP.md`), then start **Cycle 2 — Auth, RBAC,
-rate limiting**. Cycle 2 itself needs no external accounts; it can also start immediately and the
-Ollama/LangSmith prerequisites resolved before Cycle 3.
+payment method / credit card on either — see `docs/SETUP.md`), then start **Cycle 3 — LangGraph
+core, memory, streaming**. It is the largest cycle and needs Ollama, `qwen3:4b`, a LangSmith key,
+and Postgres running — resolve the two remaining external prerequisites before starting it.
 
 ---
 
@@ -37,6 +43,7 @@ These are user-side actions. Full instructions in `docs/SETUP.md`.
 | Pinecone Starter account, API key, **no payment method attached** | Cycle 1 | ✅ done |
 | LangSmith Developer account, API key, **no credit card attached** | Cycle 3 | ⬜ not done |
 | `.env` populated from `.env.example` | Cycle 1 | ✅ done (Pinecone key set; DB_* left at defaults) |
+| `JWT_SECRET_KEY` generated (`openssl rand -hex 32`) | Cycle 2 | ✅ done |
 
 ---
 
@@ -46,7 +53,7 @@ These are user-side actions. Full instructions in `docs/SETUP.md`.
 | --- | --- | --- | --- |
 | 0 | Foundation scaffold | 2h | ✅ done |
 | 1 | Corpus and hybrid retrieval | 4h | ✅ done |
-| 2 | Auth, RBAC, rate limiting | 2.5h | ⬜ pending |
+| 2 | Auth, RBAC, rate limiting | 2.5h | ✅ done |
 | 3 | LangGraph core, memory, streaming | 5h | ⬜ pending |
 | 4 | Tools and RBAC enforcement | 3h | ⬜ pending |
 | 5 | RLM research agent | 4h | ⬜ pending |
@@ -104,14 +111,39 @@ work got — not merely whether the cycle started.
       (including malformed front matter and long-section splitting), RRF fusion, hybrid-search
       degradation, and the reranker's allowlist + budget guard
 
-### Cycle 2 — Auth, RBAC, rate limiting ⬜
+### Cycle 2 — Auth, RBAC, rate limiting ✅
 
-- [ ] Static user store with hashed passwords
-- [ ] JWT issue + verify
-- [ ] `Principal` model, request-scoped context
-- [ ] Role→permission matrix (Viewer / Analyst / Administrator)
-- [ ] FastAPI dependencies (`current_principal`)
-- [ ] Async per-user token-bucket limiter, configurable thresholds, graceful 429
+- [x] Static user store with hashed passwords (`core/security/users.py` — bcrypt, one account
+      per role: `viewer` / `analyst` / `admin`, credentials in `docs/SETUP.md`)
+- [x] JWT issue + verify (`core/security/jwt.py` — HS256, `ConfigurationError` if
+      `JWT_SECRET_KEY` is unset, every verification failure collapses to one
+      `AuthenticationError` so a caller can't distinguish bad-signature from expired from
+      malformed)
+- [x] `Principal` model, request-scoped context (`core/security/rbac.py`; constructed in
+      exactly one place, `api/deps.py::current_principal`, from a verified JWT claim)
+- [x] Role→permission matrix (Viewer / Analyst / Administrator) — `core/security/rbac.py`,
+      Administrator defined as `frozenset(Permission)` so it is structurally "every
+      permission" rather than an enumerated list that could drift
+- [x] FastAPI dependencies (`api/deps.py`: `current_principal` -> `enforce_rate_limit` ->
+      `require_permission(...)`, composed in that fixed order) and `api/v1/auth.py`
+      (`POST /auth/login`, `GET /auth/me`)
+- [x] Async per-user token-bucket limiter, configurable thresholds, graceful 429
+      (`core/security/rate_limit.py` — Postgres-backed so a bucket survives an app restart;
+      pure refill math split out from the async DB shell for unit testing, same pattern as
+      `retrieval/reranker.py`'s budget guard)
+- [x] `tests/core/security/` (rbac, users, jwt, rate_limit) + `tests/api/` (auth, deps) —
+      46 new tests; verified live end to end against a real Postgres container: login for all
+      three roles, `/auth/me` round-tripping a token back to its principal, a
+      `require_permission`-gated route returning 403 for a viewer, and a real
+      `RATE_LIMIT_CAPACITY=20` bucket allowing 20 requests then returning two real 429s with
+      `retry_after_seconds`, confirmed by reading `rate_limit_buckets` directly in Postgres.
+
+`docs/ARCHITECTURE.md`'s folder structure lists `api/v1/admin.py` for "admin-only operations",
+but nothing admin-only exists to expose yet — no tools, no graph, no MCP client. Deferred to
+whichever later cycle first has real admin-only functionality (a Cycle 4 tool-registry
+inspection endpoint is the likely candidate), rather than shipping an empty placeholder file
+now. `require_permission(Permission.ADMIN_TOOLS)` is already built and tested in `api/deps.py`
+so that cycle only needs to write the route, not the authorization plumbing under it.
 
 ### Cycle 3 — LangGraph core, memory, streaming ⬜
 
@@ -178,6 +210,21 @@ From `ASSESSMENT.md`. Tracked separately because these are graded independently 
 
 Newest first. One line per meaningful change.
 
+- **2026-09-05** — Built and verified Cycle 2 (auth, RBAC, rate limiting). `bcrypt`, `pyjwt` and
+  `freezegun` were pinned in `requirements.txt`/`requirements-dev.txt` since Cycle 0 but not yet
+  installed in the venv — installing them surfaced no code issues, just confirmed the pins were
+  already correct. `RateLimiter` splits a pure, exhaustively-unit-tested refill function from a
+  thin async Postgres shell (row-locked via `SELECT ... FOR UPDATE` in the same transaction as
+  the write, seeded via `ON CONFLICT DO NOTHING` so a brand-new user's first two concurrent
+  requests can't race each other into inserting the same primary key), mirroring
+  `retrieval/reranker.py`'s split between atomic DB primitive and business logic. Generated a
+  real `JWT_SECRET_KEY` (`openssl rand -hex 32`) and ran the whole stack against the live
+  Postgres container: login for all three demo roles, `/auth/me` resolving a bearer token,
+  a `require_permission`-gated test route returning 403 for a viewer and 200 for an
+  administrator, and 20 real requests against `RATE_LIMIT_CAPACITY=20` followed by two genuine
+  429s with correct `retry_after_seconds` — confirmed by reading `rate_limit_buckets` directly
+  in Postgres, then cleared that row so the demo user isn't left pre-throttled. `ruff`, `ruff
+  format`, `mypy --strict` and all 91 tests (46 new) pass clean.
 - **2026-09-05** — Built and verified Cycle 1 against a real Pinecone Starter account (key added
   to `.env`). Verified Pinecone's v10 SDK by introspecting the installed package rather than
   recalling its API — a major-version client with a materially different surface than older

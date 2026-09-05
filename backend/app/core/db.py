@@ -76,6 +76,7 @@ def _import_all_orm_models() -> None:
     `create_all_tables()` never needs to know which modules define what — this list is the
     single place that has to stay in sync as new tables are added.
     """
+    from backend.app.core.security import rate_limit as _rate_limit  # noqa: F401
     from backend.app.retrieval import ingest as _ingest  # noqa: F401
     from backend.app.retrieval import reranker as _reranker  # noqa: F401
 
