@@ -1,0 +1,150 @@
+# Setup
+
+Everything needed to run this project locally. All components are free; see `docs/DECISIONS.md` §4
+for the verified free-tier limits and the cost guards that keep it that way.
+
+> ⚠️ **Do not attach a payment method to the Pinecone or LangSmith account.** Both providers hard-cap
+> free usage when no card is on file, which makes accidental charges structurally impossible. Adding a
+> card converts the cap into pay-as-you-go billing.
+
+---
+
+## Prerequisites
+
+### 1. Ollama + the local model
+
+The assistant runs entirely on a local model — no LLM API key, no cost, no rate limits.
+
+1. Install Ollama from <https://ollama.com/download> (Windows installer).
+2. Pull the model:
+
+   ```bash
+   ollama pull qwen3:4b
+   ```
+
+3. Verify it responds:
+
+   ```bash
+   ollama run qwen3:4b "Reply with OK"
+   ```
+
+**Why `qwen3:4b`:** the development machine has an RTX 3050 with **4 GB VRAM**. A 4B model at Q4
+quantization fits entirely in VRAM (~2.6 GB) and runs at ~40–55 tok/s; a 7–8B model spills to CPU and
+drops to ~8–15 tok/s, which pushes a single question past four minutes. Full reasoning in
+`docs/DECISIONS.md` §3. **Do not load a second model concurrently** — there is not enough VRAM, and
+Ollama will thrash evicting and reloading.
+
+### 2. Pinecone (vector database)
+
+1. Sign up for the free **Starter** plan at <https://www.pinecone.io/> — no credit card required.
+2. **Do not add a payment method.**
+3. Create an API key and copy it into `.env` as `PINECONE_API_KEY`.
+
+Indexes are created by the ingestion script; you do not need to create them by hand. Starter is
+limited to AWS `us-east-1`.
+
+### 3. LangSmith (tracing — mandatory per the spec)
+
+1. Sign up for the free **Developer** plan at <https://smith.langchain.com/>.
+2. **Do not add a credit card** — personal organizations are hard-capped at 5k traces/month without one.
+3. Copy the API key into `.env` as `LANGSMITH_API_KEY`.
+
+> ⏰ **Free-tier traces are retained for 14 days.** The demo video must show live traces, so record it
+> within 14 days of the run you intend to show.
+
+### 4. Docker (Postgres)
+
+Docker Desktop is already installed on the development machine (29.6.1). Only Postgres is
+containerized; the backend, frontend and MCP server run natively.
+
+### 5. Python
+
+Python 3.11 (3.11.5 verified on the development machine).
+
+---
+
+## Environment variables
+
+Copy `.env.example` to `.env` and fill in the three keys. `.env` is gitignored; `.env.example` is
+committed and must stay in sync whenever a variable is added.
+
+| Variable | Purpose |
+| --- | --- |
+| `PINECONE_API_KEY` | Pinecone authentication |
+| `PINECONE_DENSE_INDEX` | Dense index name |
+| `PINECONE_SPARSE_INDEX` | Sparse index name |
+| `LANGSMITH_API_KEY` | LangSmith tracing |
+| `LANGSMITH_PROJECT` | Trace project name |
+| `LANGSMITH_TRACING` | `true` to enable tracing |
+| `OLLAMA_BASE_URL` | Default `http://localhost:11434` |
+| `OLLAMA_MODEL` | Default `qwen3:4b` |
+| `DATABASE_URL` | Postgres connection string |
+| `JWT_SECRET_KEY` | Token signing secret |
+| `JWT_EXPIRE_MINUTES` | Token lifetime |
+| `RERANK_ENABLED` | `false` in development — protects the 500/month budget |
+| `RERANK_MONTHLY_BUDGET` | Hard cutoff, default below 500 |
+| `RATE_LIMIT_CAPACITY` | Token-bucket capacity per user |
+| `RATE_LIMIT_REFILL_PER_SEC` | Token-bucket refill rate |
+| `LOG_LEVEL` | Default `INFO` |
+
+---
+
+## Install
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+pip install -r requirements.txt
+```
+
+---
+
+## Running
+
+Start each in its own terminal, in this order:
+
+```bash
+# 1. Postgres
+docker compose up -d postgres
+
+# 2. Ingest the corpus (first run only, or after changing seed documents)
+python -m scripts.ingest
+
+# 3. Backend API
+uvicorn backend.app.main:app --reload --port 8000
+
+# 4. MCP server
+python -m mcp_server
+
+# 5. Streamlit frontend
+streamlit run frontend/app.py
+```
+
+The UI is then at <http://localhost:8501> and the API at <http://localhost:8000>
+(docs at `/docs`).
+
+---
+
+## Demo users
+
+Static credentials for the three RBAC roles. Defined in the user store; see `docs/DECISIONS.md` §2
+for why hardcoded users were chosen over Keycloak.
+
+| Role | Allowed |
+| --- | --- |
+| **Viewer** | Chat and search only — no administrative or analytics tools |
+| **Analyst** | Search, analytics tools, MCP tools |
+| **Administrator** | All tools |
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Very slow responses (>3 min/question) | A model larger than 4B is loaded, or a second model is resident. Run `ollama ps` and confirm only `qwen3:4b`. |
+| `connection refused` on port 11434 | Ollama is not running. Start it and retry. |
+| Pinecone auth errors | `PINECONE_API_KEY` missing or the index is in a non-`us-east-1` region. |
+| No traces in LangSmith | `LANGSMITH_TRACING` is not `true`, or the key is missing. |
+| Reranking silently inactive | Expected in development (`RERANK_ENABLED=false`), or the monthly budget guard has tripped. |
+| Postgres connection failures | `docker compose ps` — confirm the container is healthy. |
