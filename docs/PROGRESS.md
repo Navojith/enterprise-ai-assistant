@@ -82,7 +82,11 @@ tests (263 total, up from 213); `ruff`, `ruff format`, `mypy --strict` all pass 
 `guardrails/validators.py`, `guardrails/citations.py`, `guardrails/brand.py`, and replacing
 `agents/nodes/validator.py`'s current structural-only check with real citation verification
 against retrieved chunk ids, plus the brand/injection guardrails). No external prerequisites are
-blocking Cycle 6.
+blocking Cycle 6. **Deferred, not blocking:** re-confirm live that a Viewer's identical
+spec-example research question still routes to `"retrieval"` (already confirmed once via curl in
+this cycle's own live verification — see the session log above) — the user asked to redo this
+specific check through the Streamlit UI once Cycle 7 builds it, purely as a nice-to-have, not a
+reason to reorder Cycle 6 ahead of or behind anything.
 
 ---
 
