@@ -105,13 +105,13 @@ Open source, local, no account, no cost.
 
 ### The billing trap this uncovered
 
-Pinecone's integrated reranking exposes `cohere-rerank-v3.5` through the **same API** as the free
+Pinecone's integrated reranking exposes `cohere-rerank-3.5` through the **same API** as the free
 models, but it has **0 free requests on Starter** and would bill on the first call. An earlier draft
 of the plan said only "Pinecone hosted reranker", which would have selected a billed model by accident.
 
 ### Cost guards this forces into the design
 
-1. **Reranker model is an allowlisted constant**, not a free-form config string. `cohere-rerank-v3.5`
+1. **Reranker model is an allowlisted constant**, not a free-form config string. `cohere-rerank-3.5`
    cannot be selected even by misconfiguration.
 2. **Rerank runs once per user turn**, on the final fused candidate set — **never per RLM sub-agent**,
    which would exhaust 500 requests in a handful of questions. Off by default in development; enabled

@@ -18,6 +18,7 @@ from fastapi.responses import Response
 
 from backend.app.api.v1.health import router as health_router
 from backend.app.core.config import get_settings
+from backend.app.core.db import create_all_tables
 from backend.app.core.errors import register_exception_handlers
 from backend.app.core.logging import (
     CORRELATION_ID_HEADER,
@@ -34,6 +35,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings)
     logger.info("startup", environment=settings.environment, ollama_model=settings.ollama_model)
+
+    # Best-effort: a Postgres blip here shouldn't stop the process from serving liveness/
+    # readiness (which will itself report the database as unreachable) — see the retry-free
+    # graceful-degradation pattern in api/v1/health.py.
+    try:
+        await create_all_tables()
+    except Exception:
+        logger.warning("startup_table_creation_failed", exc_info=True)
 
     # Cycle 1: create the Pinecone client (dense + sparse indexes) and store it on app.state.
     # Cycle 3: open the AsyncPostgresSaver checkpointer pool and issue an Ollama warm-up call.

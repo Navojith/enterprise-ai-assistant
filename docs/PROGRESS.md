@@ -11,28 +11,32 @@
 
 ## Current state
 
-**Cycle 0 is done.** The scaffold, config, structured logging, the exception hierarchy, the app
-factory, and the liveness/readiness health check are built, and were verified end to end against a
-real Postgres container (not just linted) — see the Cycle 0 checklist below and the session log for
-what that verification found. Cycle 1 needs Pinecone credentials before it can start; see "Blocked on"
-below.
+**Cycles 0 and 1 are done.** Cycle 0's scaffold, config, logging, errors, app factory and health
+checks are built and verified against real Postgres. Cycle 1's corpus (64 documents, 224 chunks),
+hybrid retrieval, and reranking are built and verified against a **real, live Pinecone Starter
+account** — indexes created, all 224 chunks ingested into both the dense and sparse indexes across
+6 namespaces, idempotency confirmed (a second `python -m scripts.ingest` run re-embeds zero chunks),
+RBAC access-level filtering confirmed across roles, and reranking confirmed end to end including its
+Postgres-backed budget counter. See the Cycle 1 checklist below and the session log for what that
+verification found and fixed.
 
-**Next action:** get a Pinecone Starter API key (no payment method attached; see `docs/SETUP.md`),
-then start **Cycle 1 — Corpus and hybrid retrieval**.
+**Next action:** get a LangSmith Developer API key and install Ollama (`ollama pull qwen3:4b`; no
+payment method / credit card on either — see `docs/SETUP.md`), then start **Cycle 2 — Auth, RBAC,
+rate limiting**. Cycle 2 itself needs no external accounts; it can also start immediately and the
+Ollama/LangSmith prerequisites resolved before Cycle 3.
 
 ---
 
 ## Blocked on — external prerequisites
 
-These are user-side actions. Cycle 0 does not need them; Cycle 1 and Cycle 3 do.
-Full instructions in `docs/SETUP.md`.
+These are user-side actions. Full instructions in `docs/SETUP.md`.
 
 | Prerequisite | Needed by | Status |
 | --- | --- | --- |
 | Ollama installed + `ollama pull qwen3:4b` | Cycle 3 | ⬜ not done |
-| Pinecone Starter account, API key, **no payment method attached** | Cycle 1 | ⬜ not done |
+| Pinecone Starter account, API key, **no payment method attached** | Cycle 1 | ✅ done |
 | LangSmith Developer account, API key, **no credit card attached** | Cycle 3 | ⬜ not done |
-| `.env` populated from `.env.example` | Cycle 1 | ⬜ not done |
+| `.env` populated from `.env.example` | Cycle 1 | ✅ done (Pinecone key set; DB_* left at defaults) |
 
 ---
 
@@ -41,7 +45,7 @@ Full instructions in `docs/SETUP.md`.
 | # | Cycle | Est. | Status |
 | --- | --- | --- | --- |
 | 0 | Foundation scaffold | 2h | ✅ done |
-| 1 | Corpus and hybrid retrieval | 4h | ⬜ pending |
+| 1 | Corpus and hybrid retrieval | 4h | ✅ done |
 | 2 | Auth, RBAC, rate limiting | 2.5h | ⬜ pending |
 | 3 | LangGraph core, memory, streaming | 5h | ⬜ pending |
 | 4 | Tools and RBAC enforcement | 3h | ⬜ pending |
@@ -75,17 +79,30 @@ work got — not merely whether the cycle started.
 - [x] `tests/` — 12 tests covering the rerank-budget validator, the exception→JSON envelope
       mapping, and both readiness branches; `pytest`/`ruff`/`mypy --strict` all pass clean.
 
-### Cycle 1 — Corpus and hybrid retrieval ⬜
+### Cycle 1 — Corpus and hybrid retrieval ✅
 
-- [ ] Seed corpus generator (~60 docs: incidents, runbooks, architecture, product specs, policies, meeting notes)
-- [ ] Metadata schema: `department`, `document_type`, `access_level`, `created_date`
-- [ ] Structure-aware chunking preserving document + section attribution
-- [ ] Content-hashed **idempotent** ingestion (protects the 5M-token embedding allowance)
-- [ ] Pinecone dense index (`llama-text-embed-v2`) with namespaces
-- [ ] Pinecone sparse index (`pinecone-sparse-english-v0`)
-- [ ] `retrieval/hybrid.py` — concurrent dense+sparse fan-out, RRF fusion
-- [ ] `retrieval/reranker.py` — `bge-reranker-v2-m3`, allowlisted, monthly budget guard
-- [ ] `access_level` filter derived from the caller's role
+- [x] Seed corpus generator (64 docs: 18 incidents, 10 runbooks, 9 architecture, 9 product specs,
+      9 policies, 9 meeting notes — `scripts/generate_seed_corpus.py`, deterministic/seeded).
+      Payment-failure incidents deliberately draw from 5 recurring root causes for the RLM demo.
+- [x] Metadata schema: `department`, `document_type`, `access_level`, `created_date`
+      (`retrieval/models.py`)
+- [x] Structure-aware chunking preserving document + section attribution (`retrieval/chunking.py`;
+      224 chunks from 64 documents)
+- [x] Content-hashed **idempotent** ingestion (`retrieval/ingest.py` + `ingested_chunks` table) —
+      verified live: a second `python -m scripts.ingest` run re-embeds 0 of 224 chunks
+- [x] Pinecone dense index (`llama-text-embed-v2`) with namespaces — created and populated live
+- [x] Pinecone sparse index (`pinecone-sparse-english-v0`) with namespaces — created and populated live
+- [x] `retrieval/hybrid.py` — concurrent dense+sparse fan-out, RRF fusion; verified live against
+      the ingested corpus
+- [x] `retrieval/reranker.py` — `bge-reranker-v2-m3` allowlisted (blocklist checked against the
+      SDK's real enum value, `cohere-rerank-3.5`), Postgres-backed monthly budget guard; verified
+      live end to end including the counter
+- [x] `access_level` filter derived from the caller's role (`allowed_access_levels()` in
+      `retrieval/models.py`); verified live that a viewer query excludes confidential chunks an
+      analyst query returns
+- [x] `tests/retrieval/` — 30 tests: access-level policy, chunk identity/idempotency, chunking
+      (including malformed front matter and long-section splitting), RRF fusion, hybrid-search
+      degradation, and the reranker's allowlist + budget guard
 
 ### Cycle 2 — Auth, RBAC, rate limiting ⬜
 
@@ -161,6 +178,26 @@ From `ASSESSMENT.md`. Tracked separately because these are graded independently 
 
 Newest first. One line per meaningful change.
 
+- **2026-09-05** — Built and verified Cycle 1 against a real Pinecone Starter account (key added
+  to `.env`). Verified Pinecone's v10 SDK by introspecting the installed package rather than
+  recalling its API — a major-version client with a materially different surface than older
+  versions — which caught three mistakes before they shipped: `search()`'s `inputs`/`top_k`/
+  `filter` are top-level kwargs, not nested under `query=`; hits expose `.id`/`.score`, not
+  `"_id"`/`"_score"`; and the billed rerank model's real string is `cohere-rerank-3.5`, not
+  `cohere-rerank-v3.5` as `docs/DECISIONS.md` had it — corrected everywhere. Also found and fixed
+  a second, script-shaped instance of Cycle 0's Windows event-loop bug (`scripts/ingest.py` has no
+  `--loop` flag to reach for; added `install_selector_event_loop_policy()` to `core/loop.py` for
+  plain scripts), and a real SQLAlchemy gotcha where `RerankUsage`'s table was never created
+  because nothing had imported its module yet (`create_all_tables()` now imports every ORM module
+  itself). Full pipeline — corpus generation, chunking, idempotent ingestion, hybrid search, RBAC
+  filtering, reranking with its budget counter — exercised live end to end, not just unit-tested.
+- **2026-09-05** — Changed Postgres connection config from a single `DATABASE_URL` to five
+  granular `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER`/`DB_PASSWORD` fields at the user's request;
+  `docker-compose.yml` now provisions its container from the same `.env` names. Found and fixed a
+  related bug: pydantic-settings treated a blank `.env` value as an explicit empty string rather
+  than "unset", which would have broken the DSN and silently turned blank secrets into
+  `SecretStr("")` instead of `None` — fixed with `env_ignore_empty=True`.
+
 - **2026-09-05** — Built and verified Cycle 0 (scaffold, config, structured logging, exception
   hierarchy, app factory, health endpoints, `docker-compose.yml`, 12 passing tests). Verification
   against a real Postgres container surfaced two environment-specific findings, both fixed and
@@ -173,7 +210,7 @@ Newest first. One line per meaningful change.
   `DELIVERY_PLAN`, `SETUP`, `ASSUMPTIONS_AND_TRADEOFFS`, `README`, `.gitignore`) and rewrote
   `CLAUDE.md` as the context-wipe recovery entry point. No application code yet.
 - **2026-09-05** — Verified Pinecone Starter and LangSmith Developer free-tier limits against live
-  pricing pages; found that `cohere-rerank-v3.5` bills on first call and pinned the reranker to
+  pricing pages; found that `cohere-rerank-3.5` bills on first call and pinned the reranker to
   `bge-reranker-v2-m3` behind an allowlist.
 - **2026-09-05** — Measured hardware (RTX 3050, 4 GB VRAM) and settled on a single local `qwen3:4b`
   model for every graph node to avoid model-eviction thrash.

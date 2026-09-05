@@ -106,7 +106,7 @@ carry the majority of the grade and their absence is immediately visible to an e
 | **Latency** — 8–15 LLM calls per question on a 4 GB GPU | High. Could make the demo unwatchable. | Short schema-constrained outputs, thinking mode off, startup warm-up call, capped RLM fan-out, concurrent retrieval. Budget 60–90 s per question. |
 | **4B plan-generation quality** — weak Python search plans | High. RLM is 10% and the key differentiator. | Tight `rlm` API surface, few-shot examples, schema constraints, deterministic fallback plan on validation failure. |
 | **Rerank budget** — 500 requests/month | Medium. Tightest limit in the stack. | Once per turn only, off by default in dev, automatic cutoff before the cap, degrades to RRF ordering. |
-| **Accidental billed model** — `cohere-rerank-v3.5` | Medium. Breaks the zero-cost constraint. | Allowlisted model constant; the billed model cannot be selected. |
+| **Accidental billed model** — `cohere-rerank-3.5` | Medium. Breaks the zero-cost constraint. | Allowlisted model constant; the billed model cannot be selected. |
 | **RAM contention** — Ollama + Postgres + Streamlit on 15.7 GB | Medium. Swapping would compound latency. | Single 4B model; never load a second model concurrently. |
 | **LangSmith 14-day retention** | Medium. Traces are a required deliverable. | Record the demo within 14 days of the traced run. |
 
@@ -130,6 +130,6 @@ End-to-end verification before the build is considered complete.
 6. Kill Pinecone connectivity mid-session; confirm graceful degradation rather than a crash.
 7. Open LangSmith; confirm conversations, agent transitions, tool calls and retrieval operations are
    all traced.
-8. **Cost guard** — assert the reranker allowlist rejects `cohere-rerank-v3.5`, that the monthly
+8. **Cost guard** — assert the reranker allowlist rejects `cohere-rerank-3.5`, that the monthly
    counter disables reranking before 500 requests, and that re-running ingest re-embeds zero unchanged
    chunks. Confirm no payment method is attached to either account.

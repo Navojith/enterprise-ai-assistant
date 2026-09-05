@@ -107,7 +107,13 @@ Start each in its own terminal, in this order:
 # 1. Postgres
 docker compose up -d postgres
 
-# 2. Ingest the corpus (first run only, or after changing seed documents)
+# (optional) Regenerate the seed corpus — data/seed/ is already committed with 64 generated
+# documents, so this is only needed after changing scripts/generate_seed_corpus.py. It is
+# deterministic: re-running it produces byte-identical files.
+python -m scripts.generate_seed_corpus
+
+# 2. Ingest the corpus (first run only, or after changing seed documents) — creates the
+# Pinecone indexes on first run, and is idempotent: re-running re-embeds nothing unchanged.
 python -m scripts.ingest
 
 # 3. Backend API

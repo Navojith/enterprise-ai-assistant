@@ -97,7 +97,7 @@ in the stack.
 during demo runs.
 
 **Guard:** a persisted monthly counter disables reranking *before* the cap rather than erroring at it,
-degrading to pure RRF ordering. `cohere-rerank-v3.5` is excluded by allowlist because it bills on the
+degrading to pure RRF ordering. `cohere-rerank-3.5` is excluded by allowlist because it bills on the
 first call despite sharing the same API.
 
 ### 5. Simplified RLM
@@ -142,6 +142,14 @@ that's most costly to debug.
 that forces `SelectorEventLoop` on Windows regardless of other flags, and is a no-op on Linux/macOS.
 `docs/SETUP.md`'s run command and `CLAUDE.md`'s dev commands were updated to always pass it.
 
+**The same bug, a second time, in a different shape:** `scripts/ingest.py` (Cycle 1) hit the identical
+`ProactorEventLoop` error the first time it touched Postgres — but a plain script calling `asyncio.run()`
+has no `--loop` flag to reach for, and (unlike uvicorn, which bypasses it) `asyncio.run()` *does* build
+its loop through the event-loop *policy*. `backend/app/core/loop.py` therefore provides a second,
+complementary function, `install_selector_event_loop_policy()`, that every future Postgres-touching
+script must call before `asyncio.run(...)` — documented together in one module so the next script
+doesn't have to rediscover which of the two fixes applies to which entry point.
+
 **Cost:** `SelectorEventLoop` cannot spawn subprocesses on Windows. Nothing in this application does.
 
 ### 9. Docker's Postgres container publishes on host port 5433, not 5432
@@ -173,6 +181,39 @@ have silently produced a broken DSN (and, separately, `SecretStr("")` instead of
 already-blank `PINECONE_API_KEY`/`LANGSMITH_API_KEY`/`JWT_SECRET_KEY` fields from Cycle 0). Fixed by
 setting `env_ignore_empty=True` on `Settings.model_config`, so a blank value falls back to the
 field's default exactly like an absent one does.
+
+### 11. Pinecone's Python SDK (v10) was verified by introspecting the installed package, not from training recall
+
+**Why:** `requirements.txt` pins `pinecone==10.0.0` — a major-version SDK with a materially different
+surface from the client most training data (and most public tutorials) describe, including an entire
+"Documents/Assistant" API absent from earlier versions. Writing `retrieval/pinecone_store.py` against
+a remembered API shape would have produced code that imports cleanly, passes `mypy`, and fails only at
+the first real call.
+
+**What was actually done:** every method used — `create_index_for_model`, `has_index`, `IndexAsyncio`,
+`search`, `upsert_records`, `describe_index_stats`, `inference.rerank` — was checked against the
+installed package's real signatures and docstrings (`inspect.signature`, reading the source directly)
+*and* exercised against a live Starter account before being treated as correct. That process caught
+three mistakes a docs-only reading would not have: `search()`'s `inputs`/`top_k`/`filter` are top-level
+keyword arguments, not nested under a `query=` parameter as one plausible reading of the REST API
+suggests; a hit's id and score are `.id`/`.score` attributes, not `"_id"`/`"_score"` dict keys; and the
+billed rerank model's exact string is `"cohere-rerank-3.5"`, not `"cohere-rerank-v3.5"` as
+`docs/DECISIONS.md` originally (and incorrectly) recorded it — an allowlist built against the wrong
+string would silently fail to block the model it exists to block.
+
+### 12. `create_all_tables()` imports every ORM-model module itself, rather than trusting caller order
+
+**Found while testing the reranker's budget counter end to end:** `RerankUsage`'s table was never
+created, even though `create_all_tables()` had already run successfully — because it ran from
+`scripts/ingest.py`, which never imports `retrieval/reranker.py`, and SQLAlchemy's declarative
+`Base.metadata` only knows about a model class once its module has been imported. The failure surfaced
+as `psycopg.errors.UndefinedTable` at the first rerank call, not at startup.
+
+**Fix:** `core/db.py`'s `create_all_tables()` now imports every module that defines a table itself,
+before calling `Base.metadata.create_all` — so callers (an ingestion script, the app's own startup)
+never need to know which modules define what, and a new table added in a later cycle only needs one
+line added to that one function, not a new import scattered into every entry point that might run
+before it.
 
 ---
 
