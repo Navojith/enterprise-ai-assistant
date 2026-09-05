@@ -1,12 +1,14 @@
 """Supervisor node: intent classification and routing, plus this turn's memory upkeep.
 
 Routing is schema-constrained (`docs/DECISIONS.md` §5) — the model chooses one of a fixed set of
-literal routes, never free text a caller would have to parse back into a decision. Three routes
-exist this cycle: `"retrieval"` for anything that benefits from internal document evidence,
-`"direct"` for what does not (greetings, clarifying questions), and `"tools"` (Cycle 4) for a
-request naming a specific lookup a tool answers directly — an employee, a service, an incident
-id, or a small computation over data already in the conversation — rather than an open-ended
-question. Cycle 5 adds `"research"` for the RLM path.
+literal routes, never free text a caller would have to parse back into a decision. `"retrieval"`
+is for anything that benefits from internal document evidence, `"direct"` for what does not
+(greetings, clarifying questions), `"tools"` (Cycle 4) for a request naming a specific lookup a
+tool answers directly — an employee, a service, an incident id, or a small computation over data
+already in the conversation — rather than an open-ended question, and `"research"` (Cycle 5) for
+a broad, multi-document investigation better served by a generated Python search plan than a
+single retrieval pass (`docs/ARCHITECTURE.md`'s RLM example: summarizing a year of incidents and
+identifying recurring root causes).
 
 The prompt only ever names the tool *categories* this principal's role actually has
 (`_available_tool_categories`, from `runtime.context.tool_registry.available_to`) — a Viewer,
@@ -16,6 +18,11 @@ filtering applied one level up from `tools/registry.py`'s own (which narrows wha
 `agents/nodes/tools.py` later offers *as a specific tool name*): the Supervisor is filtered on
 tool *categories*, the Tools node on tool *names* — both read from the same `ToolRegistry`, so
 neither can drift from what `tools/registry.py::execute` will actually allow at the boundary.
+`"research"` gets the identical treatment via `_build_routing_schema`: it is only ever a candidate
+value in the routing schema for a principal holding `Permission.ANALYTICS_TOOLS`, because
+`agents/nodes/research.py` executes generated code on the same `rlm/sandbox.py` execution
+boundary `python_analysis` does — a Viewer's equivalent question still gets an answer, just
+via `"retrieval"`'s single-hop path instead of a multi-batch investigation.
 
 Memory upkeep — folding old messages into the rolling summary when the thread grows past its
 verbatim budget — runs here rather than as a separate graph node, because the Supervisor already
@@ -32,7 +39,7 @@ from typing import Any, Literal
 import structlog
 from langgraph.config import get_stream_writer
 from langgraph.runtime import Runtime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 from backend.app.agents.context import GraphContext
 from backend.app.agents.principal import principal_from_state
@@ -51,8 +58,16 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "incident reports, runbooks, architecture docs, product specs, meeting notes) via "
     "retrieval, can be answered directly (greetings, clarifying questions, or general "
     "questions needing no company-specific evidence), or is better served by a tool call "
-    "({tool_categories}). When genuinely uncertain between retrieval and direct, prefer "
-    "retrieval — an evidence-backed answer is safer than a confident guess."
+    "({tool_categories}){research_clause}. When genuinely uncertain between retrieval and "
+    "direct, prefer retrieval — an evidence-backed answer is safer than a confident guess."
+)
+
+# Only ever appended when this principal holds `Permission.ANALYTICS_TOOLS` — see the module
+# docstring's note on `research` getting the same bind-time treatment as `tools`.
+_RESEARCH_CLAUSE = (
+    ", or, for a broad investigation spanning many documents that benefits from being "
+    "decomposed into batches and analyzed separately (e.g. summarizing a year of incidents "
+    "and identifying recurring root causes), route to research"
 )
 
 # Human-readable gloss for each `Permission` a tool can require, used only to describe *what
@@ -78,22 +93,39 @@ def _available_tool_categories(specs: list[ToolSpec]) -> str:
     return "; ".join(categories) if categories else "no tools are available for this request"
 
 
-class RoutingDecision(BaseModel):
-    """Field order is deliberate and load-bearing, not cosmetic: under JSON-schema-constrained
+_ROUTES_WITHOUT_RESEARCH = ("retrieval", "direct", "tools")
+_ROUTES_WITH_RESEARCH = (*_ROUTES_WITHOUT_RESEARCH, "research")
+
+
+def _build_routing_schema(*, include_research: bool) -> type[BaseModel]:
+    """A fresh `Literal[...]` schema per call, matching `agents/nodes/tools.py::
+    _build_choice_schema`'s reasoning exactly: `"research"` is only ever a value this schema
+    can even express when `include_research` is `True`, which `supervisor_node` decides from
+    `principal.has_permission(Permission.ANALYTICS_TOOLS)` — a Viewer's routing decision is
+    structurally unable to choose `"research"`, the same bind-time filtering
+    `tools/registry.py` applies to specific tool names, applied here to a route.
+
+    Field order is deliberate and load-bearing, not cosmetic: under JSON-schema-constrained
     (grammar) decoding, the model emits fields in the schema's declared order and commits to
     each one as it is produced. With `reasoning=False` there is no thinking-mode scratch space
-    either, so `reasoning` must come *before* `route` in this class — verified live that
-    reversing the order (route first) let the model choose `route="direct"` while its own
-    `reasoning` field, generated afterward, argued the opposite. Putting reasoning first forces
-    the one sentence of deliberation to happen before the choice it is supposed to justify,
-    not after.
+    either, so `reasoning` must come *before* `route` — verified live that reversing the order
+    (route first) let the model choose `route="direct"` while its own `reasoning` field,
+    generated afterward, argued the opposite. Putting reasoning first forces the one sentence
+    of deliberation to happen before the choice it is supposed to justify, not after.
     """
-
-    reasoning: str = Field(
-        description="One sentence of reasoning about what this question needs, written before deciding the route."
-    )
-    route: Literal["retrieval", "direct", "tools"] = Field(
-        description="Where to send this turn next, consistent with the reasoning above."
+    routes = _ROUTES_WITH_RESEARCH if include_research else _ROUTES_WITHOUT_RESEARCH
+    return create_model(
+        "RoutingDecision",
+        reasoning=(
+            str,
+            Field(
+                description="One sentence of reasoning about what this question needs, written before deciding the route."
+            ),
+        ),
+        route=(
+            Literal[routes],
+            Field(description="Where to send this turn next, consistent with the reasoning above."),
+        ),
     )
 
 
@@ -135,26 +167,30 @@ async def supervisor_node(state: AgentState, runtime: Runtime[GraphContext]) -> 
 
     principal = principal_from_state(state)
     available_specs = runtime.context.tool_registry.available_to(principal)
+    research_available = principal.has_permission(Permission.ANALYTICS_TOOLS)
     system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
-        tool_categories=_available_tool_categories(available_specs)
+        tool_categories=_available_tool_categories(available_specs),
+        research_clause=_RESEARCH_CLAUSE if research_available else "",
     )
     context_messages = build_context_messages(
         system_prompt=system_prompt, summary=summary, recent_messages=recent_messages
     )
+    routing_schema = _build_routing_schema(include_research=research_available)
     decision = await runtime.context.llm.astructured(
-        context_messages, schema=RoutingDecision, reasoning=False
+        context_messages, schema=routing_schema, reasoning=False
     )
+    route: str = decision.route  # type: ignore[attr-defined]
     writer(
         ActivityEvent(
             event_type=ActivityEventType.REASONING,
             node="supervisor",
-            message=decision.reasoning,
-            data={"route": decision.route},
+            message=decision.reasoning,  # type: ignore[attr-defined]
+            data={"route": route},
         )
     )
 
     updates: dict[str, Any] = {
-        "route": decision.route,
+        "route": route,
         # Reset per-turn validation bookkeeping so a retry loop from a previous turn can never
         # bias this turn's Validator into bailing out early.
         "retry_count": 0,

@@ -4,9 +4,10 @@ unit-tested directly — see `tests/agents/nodes/test_tools.py`'s module docstri
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+import pytest
+from pydantic import BaseModel, ValidationError
 
-from backend.app.agents.nodes.supervisor import _available_tool_categories
+from backend.app.agents.nodes.supervisor import _available_tool_categories, _build_routing_schema
 from backend.app.core.security.rbac import Permission
 from backend.app.tools.registry import ToolResult, ToolSpec
 
@@ -59,3 +60,34 @@ class TestAvailableToolCategories:
         )
 
         assert text.count("Python analysis") == 1
+
+
+class TestBuildRoutingSchema:
+    """`"research"` must be a structurally impossible value for a principal the Supervisor did
+    not offer it to — bind-time filtering, mirroring `tests/agents/nodes/test_tools.py`'s
+    `TestBuildChoiceSchema` for tool names, applied here to a route."""
+
+    def test_research_is_rejected_when_not_included(self) -> None:
+        schema = _build_routing_schema(include_research=False)
+
+        with pytest.raises(ValidationError):
+            schema.model_validate({"reasoning": "because", "route": "research"})
+
+    def test_research_validates_when_included(self) -> None:
+        schema = _build_routing_schema(include_research=True)
+
+        instance = schema.model_validate({"reasoning": "because", "route": "research"})
+        assert instance.route == "research"  # type: ignore[attr-defined]
+
+    def test_the_base_routes_always_validate_either_way(self) -> None:
+        for include_research in (False, True):
+            schema = _build_routing_schema(include_research=include_research)
+            for route in ("retrieval", "direct", "tools"):
+                instance = schema.model_validate({"reasoning": "because", "route": route})
+                assert instance.route == route  # type: ignore[attr-defined]
+
+    def test_reasoning_is_required(self) -> None:
+        schema = _build_routing_schema(include_research=False)
+
+        with pytest.raises(ValidationError):
+            schema.model_validate({"route": "direct"})

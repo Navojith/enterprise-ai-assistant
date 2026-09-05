@@ -156,6 +156,49 @@ class Settings(BaseSettings):
     # here; see `rlm/sandbox.py`'s module docstring for what that does and does not protect against.
     sandbox_timeout_seconds: float = Field(default=5.0, gt=0)
 
+    # --- RLM research agent (Cycle 5) ---
+    # A top-level research plan's own sandbox call bridges out to potentially several LLM calls
+    # (plan generation, up to `rlm_max_total_sub_agent_calls` sub-agent analyses, aggregation —
+    # see `rlm/api.py`'s sync/async bridge), so it needs a far larger wall-clock budget than
+    # `sandbox_timeout_seconds`'s single-call one; kept as a separate setting rather than
+    # widening that one, since `python_analysis` genuinely should stay fast. 180s, not 90s:
+    # verified live that with `rlm_max_concurrent_sub_agents=1` (sequential, deliberately — see
+    # that setting's own docstring) four sequential sub-agent calls plus plan generation,
+    # search and aggregation on this hardware's `qwen3:4b` genuinely takes 90-150s end to end;
+    # 90s cut a real, otherwise-successful run off mid-aggregation. This is the honest cost of
+    # trading concurrency for reliability on a single local 4B model, not padding for its own
+    # sake — `docs/DECISIONS.md` §3's "60-90s per question" budget assumed the RLM path would
+    # look like the rest of the graph (a handful of fast schema-constrained calls), which does
+    # not hold once a research turn genuinely fans out to multiple sequential sub-agent analyses.
+    rlm_plan_timeout_seconds: float = Field(default=180.0, gt=0)
+    # How many levels of *plan generation* `sub_agent` may recurse through before bottoming out
+    # to one direct, non-recursive LLM analysis — see `rlm/api.py`'s module docstring. Defaults
+    # to 1 (a top-level plan's `sub_agent` calls always bottom out to a single leaf analysis,
+    # never a nested plan) rather than the structurally-supported 2+: verified live that depth 2
+    # made a *single* top-level `sub_agents` call recurse into up to `rlm_max_concurrent_sub_agents`
+    # concurrent *nested plan-generation* calls — each an uncounted LLM call on top of
+    # `RLMBudget`'s own cap — which is exactly the "second resident model" style overload
+    # `docs/DECISIONS.md` §3 already forbids, just self-inflicted by recursion width instead of
+    # a second model. A deployment with real spare LLM throughput can raise this back to 2+.
+    rlm_max_depth: int = Field(default=1, ge=1)
+    # Semaphore size bounding how many `sub_agent` analyses `sub_agents` runs concurrently —
+    # docs/ARCHITECTURE.md's "bounded semaphore that prevents the RLM from saturating a single
+    # local model". Defaults to 1 (effectively sequential) rather than higher, for the same
+    # hardware reason `docs/DECISIONS.md` §3 pins the whole graph to one resident model: verified
+    # live that 4 concurrent `astructured` calls against one local `qwen3:4b` instance do not run
+    # in parallel — Ollama serializes them, so three of the four sat queued long enough to exceed
+    # `llm_request_timeout_seconds` and trip `llm/chain.py`'s circuit breaker, failing the whole
+    # turn (including the unrelated Response node, since only one provider tier is configured).
+    # Sequential sub-agent calls total the same latency a single local model would need anyway,
+    # just without the self-inflicted timeouts; raise this only for an LLM backend with real
+    # spare concurrent capacity (a cloud tier, or multiple resident models).
+    rlm_max_concurrent_sub_agents: int = Field(default=1, ge=1)
+    # A whole-recursive-tree ceiling on `sub_agent` calls, shared across every depth via
+    # `rlm.api.RLMBudget` — bounds *width*, which `rlm_max_depth` alone does not, keeping a
+    # research turn's total LLM calls inside docs/DECISIONS.md §3's per-question latency budget
+    # regardless of how the generated plan's tree happens to be shaped.
+    rlm_max_total_sub_agent_calls: int = Field(default=4, ge=1)
+
     @field_validator("rerank_monthly_budget")
     @classmethod
     def _budget_below_free_tier_ceiling(cls, value: int) -> int:

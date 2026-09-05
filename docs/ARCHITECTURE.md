@@ -70,9 +70,11 @@ graph TB
 ```
 
 `TLS` (Cycle 4) is the graph's own tool-calling node — the Supervisor's `"tools"` route,
-distinct from `RET`'s always-on single-hop retrieval and from `RES` (Cycle 5, not yet built).
-It is the one node that ever calls into `Tools`, and every arrow leaving `Tools` toward
-`External` passes through `tools/registry.py`'s execution-boundary RBAC check first — see
+distinct from `RET`'s always-on single-hop retrieval and from `RES` (Cycle 5's RLM research
+node, `"research"` route — offered only to a principal holding `Permission.ANALYTICS_TOOLS`,
+per `docs/DECISIONS.md` §9). `TLS` is the one node that ever calls into `Tools`, and every
+arrow leaving `Tools` toward `External` passes through `tools/registry.py`'s execution-boundary
+RBAC check first — see
 `docs/DECISIONS.md` §6.
 
 ---
@@ -221,10 +223,14 @@ the UI observes the graph directly rather than being fed a parallel narration.
 ### RLM implementation — 10%
 
 The planner emits **real Python** against a curated API (`search`, `filter`, `batch`, `sub_agent`,
-`aggregate`). Before execution the code passes an **AST allowlist**: no imports, no dunder attribute
-access, no I/O. Builtins are stripped, execution is wall-clock bounded, and recursion depth and
-fan-out are hard-capped. The same sandbox backs the Python Analysis tool, so the one
-security-critical component is written and audited once.
+`sub_agents`, `aggregate`). Before execution the code passes an **AST allowlist**: no imports, no
+dunder attribute access, no I/O. Builtins are stripped, execution is wall-clock bounded, and
+recursion depth and fan-out are hard-capped by a shared `RLMBudget` (`rlm/api.py`) — capable of
+2+ levels of recursive plan generation and multi-way concurrent fan-out, though both default to
+1 on this hardware for a reason verified live, not assumed (`docs/DECISIONS.md` §9). The same
+sandbox backs the Python Analysis tool, so the one security-critical component is written and
+audited once. A generated plan that fails validation twice, or fails at runtime, falls back to a
+fixed, hand-written deterministic plan rather than failing the turn.
 
 ### Security and guardrails — 10%
 
@@ -268,4 +274,5 @@ necessary exception — `exec()` is inherently synchronous — and is run on a w
 | MCP server down | Tool marked unavailable; supervisor routes around it |
 | Tool timeout | Bounded, cancelled, and reported as a tool failure event |
 | RLM plan fails validation | Deterministic fallback plan executes instead |
+| RLM sandbox exceeds its wall-clock budget, or every fallback attempt still fails | Research node catches the typed error and folds a plain-English explanation into `research_output`; the turn still completes rather than failing outright |
 | Rate limit exceeded | Graceful 429 with retry-after |

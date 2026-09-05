@@ -66,8 +66,12 @@ class AgentState(TypedDict, total=False):
     # the turn to a specific RBAC-gated tool (knowledge search, Python analysis, or an MCP
     # lookup) instead of the always-on retrieval path — for a request that names a specific
     # lookup (an employee, a service, an incident id) rather than an open-ended question.
-    # Cycle 5 adds `"research"` for the RLM path.
-    route: Literal["retrieval", "direct", "tools"]
+    # `"research"` (Cycle 5) is the RLM path: a generated Python search plan, decomposing a
+    # broad question into batches analyzed by recursive sub-agents and aggregated — offered to
+    # the Supervisor only for principals holding `Permission.ANALYTICS_TOOLS`, since it runs on
+    # the same `rlm/sandbox.py` execution boundary `python_analysis` does
+    # (`agents/nodes/supervisor.py::_available_routes`).
+    route: Literal["retrieval", "direct", "tools", "research"]
 
     retrieved_chunks: Annotated[list[RetrievedChunk], merge_retrieved_chunks]
 
@@ -77,6 +81,13 @@ class AgentState(TypedDict, total=False):
     # human-readable explanation, never a silent gap, so the Response node can tell the user
     # what happened rather than fabricating an answer around a missing result.
     tool_output: str | None
+
+    # The Research node's (Cycle 5) result for this turn — the RLM executor's aggregated
+    # summary, or a plain-English explanation if research degraded (Pinecone or the LLM
+    # unreachable). `None` on every route but `"research"`. Folded into the Response node's
+    # context alongside `tool_output` rather than replacing it, since a future turn could in
+    # principle route through both in sequence via the checkpointed conversation history.
+    research_output: str | None
 
     # The Response node's latest draft, re-written on every Validator -> Response retry.
     draft_answer: str

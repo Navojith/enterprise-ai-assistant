@@ -11,7 +11,7 @@
 
 ## Current state
 
-**Cycles 0 through 4 are done.** Cycle 0's scaffold, config, logging, errors, app factory and
+**Cycles 0 through 5 are done.** Cycle 0's scaffold, config, logging, errors, app factory and
 health checks are built and verified against real Postgres. Cycle 1's corpus (64 documents, 224
 chunks), hybrid retrieval, and reranking are built and verified against a **real, live Pinecone
 Starter account**. Cycle 2's static user store, JWT issue/verify, the `Principal`/role→permission
@@ -52,11 +52,37 @@ against pydantic v2's schema generation) and trade-off 16 (`asyncio.wait_for` ar
 `AsyncExitStack`-tracked context manager broke `anyio`'s cancel scopes — found, root-caused, and
 fixed before it ever shipped).
 
-**Next action:** start **Cycle 5 — RLM research agent** (`rlm/api.py`, `rlm/planner.py`,
-`rlm/executor.py`, the Research node and its `"research"` route). `rlm/sandbox.py` — the
-highest-risk piece of Cycle 5 per `docs/DELIVERY_PLAN.md`'s risk register — already exists and
-is tested (`tests/rlm/test_sandbox.py`), built a cycle early because `python_analysis` needed it.
-No external prerequisites are blocking Cycle 5.
+Cycle 5 — the RLM research agent — is built and verified live end to end against real Ollama,
+Pinecone, and Postgres, as an Analyst asking the spec's own example question ("Summarize all
+outage reports related to payment failures during the last year and identify recurring root
+causes"): the Supervisor's new `"research"` route (offered only to a principal holding
+`Permission.ANALYTICS_TOOLS` — a Viewer asking the identical question was confirmed live to
+route to `"retrieval"` instead, never `"research"`), `rlm/planner.py`'s schema-constrained plan
+generation with AST-validation retry and a deterministic fallback plan, and `rlm/executor.py` +
+`rlm/api.py`'s recursive executor exposing `search`/`filter`/`batch`/`sub_agent`/`sub_agents`/
+`aggregate` to generated code via a worker-thread-to-event-loop sync/async bridge
+(`asyncio` `Task.create_task(..., context=...)`, preserving the stream-writer's and — from
+Cycle 7 — LangSmith's contextvar-based state across the bridge). Three real findings from live
+verification are recorded so a future session doesn't rediscover them the hard way: the highest-
+impact one, `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 17 (concurrent sub-agent fan-out at
+the originally planned `max_depth=2`/`max_concurrent_sub_agents=4` self-DoSed the one local
+`qwen3:4b` instance — Ollama serializes concurrent requests rather than parallelizing them,
+and the resulting timeouts tripped the fallback chain's circuit breaker and failed the whole
+turn; both settings now default to 1, recorded as a load-bearing choice in `docs/DECISIONS.md`
+§9, alongside a narrower fix to a fallback-plan budget-sharing bug the same investigation
+surfaced), trade-off 18 (`agents/nodes/response.py`'s "no evidence" instruction was
+unconditional and made the model discard real research findings on a `"research"` turn — fixed
+and pinned with a new unit test, `tests/agents/nodes/test_response.py`), and the deterministic
+fallback plan itself firing on both live demo runs (the 4B model's own generated Python failed
+the AST allowlist both attempts each time) — expected per `docs/DELIVERY_PLAN.md`'s risk
+register, and the fallback produced a correct, evidence-grounded final answer both times. 32 new
+tests (263 total, up from 213); `ruff`, `ruff format`, `mypy --strict` all pass clean.
+
+**Next action:** start **Cycle 6 — guardrails and validation** (`guardrails/injection.py`,
+`guardrails/validators.py`, `guardrails/citations.py`, `guardrails/brand.py`, and replacing
+`agents/nodes/validator.py`'s current structural-only check with real citation verification
+against retrieved chunk ids, plus the brand/injection guardrails). No external prerequisites are
+blocking Cycle 6.
 
 ---
 
@@ -83,7 +109,7 @@ These are user-side actions. Full instructions in `docs/SETUP.md`.
 | 2 | Auth, RBAC, rate limiting | 2.5h | ✅ done |
 | 3 | LangGraph core, memory, streaming | 5h | ✅ done |
 | 4 | Tools and RBAC enforcement | 3h | ✅ done |
-| 5 | RLM research agent | 4h | ⬜ pending |
+| 5 | RLM research agent | 4h | ✅ done |
 | 6 | Guardrails and validation | 2.5h | ⬜ pending |
 | 7 | Frontend, observability, docs | 4h | ⬜ pending |
 
@@ -248,18 +274,45 @@ since the test environment has no `PINECONE_API_KEY`.
       `test_graph.py` cases for the `"tools"` route — 79 new tests (213 total); `ruff`,
       `ruff format`, `mypy --strict` all pass clean.
 
-### Cycle 5 — RLM research agent ⬜
+### Cycle 5 — RLM research agent ✅
 
 - [x] `rlm/sandbox.py` — AST allowlist, stripped builtins, no imports/dunders/IO, wall-clock
       timeout — **built in Cycle 4** (`python_analysis` needed it); nothing left to do here
-- [ ] Re-verify `rlm/sandbox.py` still fits the planner/executor's needs unchanged before
-      building on top of it — it was designed for a single tool call, not yet exercised under
-      recursive sub-agent fan-out
-- [ ] `rlm/api.py` — `search` / `filter` / `batch` / `sub_agent` / `aggregate`
-- [ ] `rlm/planner.py` — schema-constrained Python plan generation
-- [ ] `rlm/executor.py` — recursion depth + fan-out caps, bounded semaphore
-- [ ] Result aggregator
-- [ ] Deterministic fallback plan when generated code fails validation
+- [x] Re-verified `rlm/sandbox.py` fits recursive sub-agent fan-out unchanged — its
+      `injected_globals` contract needed no changes; the new work was entirely in what gets
+      injected (`rlm/api.py`), not the sandbox itself
+- [x] `rlm/api.py` — `search` / `filter` / `batch` / `sub_agent` / `sub_agents` / `aggregate`,
+      each a plain-looking synchronous function from the sandboxed code's point of view that
+      bridges to the real event loop via `loop.create_task(coro, context=...)` — verified live
+      that the stdlib's own `asyncio.run_coroutine_threadsafe` does *not* preserve the calling
+      context, which would have silently detached every sandboxed LLM call from the stream
+      writer and (Cycle 7) LangSmith tracing
+- [x] `rlm/planner.py` — schema-constrained Python plan generation (`ResearchPlan`), one retry
+      with the specific AST violations fed back as feedback, then a deterministic fallback
+- [x] `rlm/executor.py` — recursion depth + fan-out caps via one `RLMBudget` shared by
+      reference across the whole recursive tree, bounded semaphore for concurrent fan-out
+- [x] Result aggregator — `aggregate(findings, question)`, one LLM call synthesizing every
+      sub-agent finding into `{"summary": ..., "recurring_themes": [...]}`
+- [x] Deterministic fallback plan when generated code fails validation *or* fails at runtime
+      after validating — `rlm/planner.py::deterministic_fallback_plan`, given a **fresh**
+      `RLMBudget` at depth 0 so a failed generated attempt can't leave the fallback with
+      nothing to spend (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 17)
+- [x] Supervisor `"research"` route, gated to `Permission.ANALYTICS_TOOLS` the same way
+      `"tools"` is gated per tool name (`agents/nodes/supervisor.py::_build_routing_schema`)
+- [x] Research node (`agents/nodes/research.py`) wiring `rlm/executor.py` into the graph,
+      folding its result into a new `research_output` state field
+- [x] `tests/rlm/` (api, planner, executor — 32 new tests, including a real
+      `run_sandboxed`-through-the-bridge integration test, not just mocks) plus
+      `tests/agents/nodes/test_research.py`, `test_response.py`, and extensions to
+      `test_supervisor.py`/`test_graph.py` for the new route — 263 total; `ruff`,
+      `ruff format`, `mypy --strict` all pass clean
+- [x] Live end to end against real Ollama/Pinecone/Postgres: an Analyst's exact
+      spec-example question routed to `"research"`, ran the deterministic fallback plan
+      (the 4B model's own generated plan failed AST validation both attempts, both live
+      runs — expected per `docs/DELIVERY_PLAN.md`'s risk register), completed four
+      sequential sub-agent analyses, aggregated them, and produced a correct,
+      evidence-grounded final answer that passed validation; the identical question from
+      a Viewer routed to `"retrieval"` instead, confirming the RBAC gate holds
 
 ### Cycle 6 — Guardrails and validation ⬜
 
@@ -298,6 +351,42 @@ From `ASSESSMENT.md`. Tracked separately because these are graded independently 
 
 Newest first. One line per meaningful change.
 
+- **2026-09-05** — Built and verified Cycle 5 (RLM research agent) live end to end against
+  real Ollama, Pinecone, and Postgres. Two consequential, non-obvious findings surfaced by
+  live verification (not caught by 32 new passing unit tests, `ruff`, or `mypy --strict` —
+  all of which passed clean the whole time) and fixed before being called done, both recorded
+  in full in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-offs 17–18: first, the originally
+  planned `rlm_max_depth=2`/`rlm_max_concurrent_sub_agents=4` made a single research turn fire
+  four concurrent LLM calls at one local `qwen3:4b` instance, which does not serve them in
+  parallel — Ollama serializes them — so three queued past `llm_request_timeout_seconds` and
+  tripped the fallback chain's circuit breaker, failing the *entire* turn including the
+  unrelated Response node; fixed by defaulting both settings to 1 (sequential, one level of
+  recursion) and raising `rlm_plan_timeout_seconds` from 90s to 180s to match the real
+  sequential cost, recorded as a load-bearing choice in a new `docs/DECISIONS.md` §9 rather
+  than left as an unexplained config value. A second, narrower bug the same investigation
+  found: `rlm/executor.py`'s runtime-failure fallback path reused the failed attempt's
+  already-spent `RLMBudget`, leaving the deterministic fallback plan — the one guarantee
+  `docs/DELIVERY_PLAN.md` asks for — with no sub-agent budget of its own; fixed by giving a
+  depth-0 fallback a fresh budget while a nested one still shares the whole-tree cap. Second,
+  once a research turn could complete at all, its answer flatly denied any evidence had been
+  found despite real aggregated findings sitting one paragraph above it in the same prompt —
+  traced to `agents/nodes/response.py`'s "no evidence" instruction being unconditional since
+  Cycle 3, correct for `"retrieval"`/`"direct"` turns but actively misleading once Cycle 4's
+  `tool_output` and this cycle's `research_output` gave a turn other ways to have real
+  evidence; fixed by conditioning the instruction on all three fields being empty together,
+  extracted into a pure `_build_system_prompt` function specifically so
+  `tests/agents/nodes/test_response.py` can pin the regression. Verified the fixes, not just
+  the original build, by rerunning the spec's own example question live after each change —
+  each prior run's exact failure mode was gone and the next one appeared, rather than
+  re-testing the same failure twice. Final confirmed run: an Analyst's request routed to
+  `"research"`, ran the deterministic fallback (the 4B model's own generated Python failed
+  AST validation on both attempts, both live runs — an accepted, mitigated risk per
+  `docs/DELIVERY_PLAN.md`'s risk register, not a bug), completed four real sequential
+  sub-agent analyses over live-retrieved incident chunks, aggregated them, and produced a
+  correct, evidence-grounded, validation-passing answer; the identical question from a Viewer
+  routed to `"retrieval"` instead, confirming `_build_routing_schema`'s bind-time RBAC gate
+  holds for the new route exactly as it does for `"tools"`. 263 tests total (32 new); `ruff`,
+  `ruff format`, `mypy --strict` all pass clean.
 - **2026-09-05** — Built and verified Cycle 4 (tools and RBAC enforcement) live end to end
   against a real `mcp_server` process, real Ollama, real Pinecone, and real Postgres running
   together. Verified the `mcp==2.1.1` SDK by importing the installed package rather than

@@ -4,12 +4,13 @@ checkpointed graph.
 ```
 START -> supervisor --route=retrieval--> retrieval -> response -> validator --pass/exhausted--> END
               |--route=direct-----------------------> response -----^          \--retry--> response
-              \--route=tools----------> tools -------> response -----^
+              |--route=tools----------> tools -------> response -----^
+              \--route=research-------> research -----> response ----^
 ```
 
-Cycle 5 adds a `"research"` route to a new Research node — additive to this topology, not a
-rewrite of it — the conditional-edge function below already reads `state["route"]` from a
-schema that only needs to widen, not replace.
+The `"research"` route (Cycle 5) was additive to this topology, not a rewrite of it — the
+conditional-edge function below only needed one more entry in `_SUPERVISOR_ROUTES`, since
+`state["route"]`'s schema already widened to include it (`agents/nodes/supervisor.py`).
 
 The checkpointer is accepted as a parameter, built by `main.py`'s lifespan and owned by it for
 the process's lifetime (`AsyncPostgresSaver` needs an open connection/pool and its own `setup()`
@@ -28,6 +29,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from backend.app.agents.context import GraphContext
+from backend.app.agents.nodes.research import research_node
 from backend.app.agents.nodes.response import response_node
 from backend.app.agents.nodes.retrieval import retrieval_node
 from backend.app.agents.nodes.supervisor import supervisor_node
@@ -35,7 +37,7 @@ from backend.app.agents.nodes.tools import tools_node
 from backend.app.agents.nodes.validator import validator_node
 from backend.app.agents.state import AgentState
 
-_SUPERVISOR_ROUTES = {"retrieval": "retrieval", "tools": "tools"}
+_SUPERVISOR_ROUTES = {"retrieval": "retrieval", "tools": "tools", "research": "research"}
 
 
 def _after_supervisor(state: AgentState) -> str:
@@ -72,6 +74,7 @@ def build_graph(
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("retrieval", retrieval_node)
     graph.add_node("tools", tools_node)
+    graph.add_node("research", research_node)
     graph.add_node("response", response_node)
     graph.add_node("validator", validator_node)
 
@@ -79,10 +82,16 @@ def build_graph(
     graph.add_conditional_edges(
         "supervisor",
         _after_supervisor,
-        {"retrieval": "retrieval", "tools": "tools", "response": "response"},
+        {
+            "retrieval": "retrieval",
+            "tools": "tools",
+            "research": "research",
+            "response": "response",
+        },
     )
     graph.add_edge("retrieval", "response")
     graph.add_edge("tools", "response")
+    graph.add_edge("research", "response")
     graph.add_edge("response", "validator")
     after_validator = _make_after_validator(max_validator_retries=max_validator_retries)
     graph.add_conditional_edges("validator", after_validator, {"response": "response", END: END})

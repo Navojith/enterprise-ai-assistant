@@ -202,3 +202,31 @@ Two decisions were taken in different rounds and appeared to conflict. Both are 
 - Surface decision points as explicit questions rather than picking a default silently. Where an
   assumption is unavoidable, record it in `docs/ASSUMPTIONS_AND_TRADEOFFS.md`.
 - `docs/PROGRESS.md` is updated in the same pass as the work it describes.
+
+---
+
+## 9. RLM recursion depth and sub-agent concurrency default to 1, not the originally planned 2/4
+
+Cycle 5's RLM executor (`rlm/executor.py`, `rlm/api.py`) is fully built to support recursive
+plan generation (`sub_agent` recursing into a nested plan) and concurrent sub-agent fan-out
+(`sub_agents`, bounded by a semaphore) — both `Settings.rlm_max_depth` and `Settings.
+rlm_max_concurrent_sub_agents` are configurable, and the mechanism does not change if either is
+raised. The **defaults**, however, are both `1`, not the `2`/`4` originally planned, because
+live verification against this project's actual hardware showed the higher defaults self-DoS
+the one local model §3 already establishes as the whole graph's shared, non-concurrent
+resource: four concurrent `astructured` calls to `qwen3:4b` do not run in parallel on one RTX
+3050 — Ollama serializes them — so three of the four queued long enough to exceed
+`llm_request_timeout_seconds` and trip `llm/chain.py`'s circuit breaker, failing the entire
+turn including the unrelated Response node. `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 17
+has the full investigation and the accompanying fallback-budget bug it also surfaced.
+
+This is the same reasoning as §3's "one model serves every node," extended from concurrent
+*models* to concurrent *requests* against that one model: a bounded semaphore only protects a
+backend from saturation if the bound sits at or below that backend's actual concurrent
+capacity, and for one local model on consumer GPU hardware that capacity is 1. Raising either
+setting is a configuration change for a deployment with an LLM backend that genuinely serves
+concurrent requests (a cloud tier, or multiple resident models) — not a code change — since the
+recursive, concurrent-capable mechanism stays fully in place underneath the conservative
+default. `Settings.rlm_plan_timeout_seconds` was raised from 90s to 180s to match: sequential
+execution of a full research turn (plan generation, search, up to four sequential sub-agent
+analyses, aggregation) measured 90–150s live on this hardware.

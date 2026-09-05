@@ -342,6 +342,93 @@ high priority requirement," which is not a trade worth making here.
 `aclose()`/`__aexit__` will happen later, elsewhere, off the stack — this applies to any future
 `anyio`-based async context manager added to this codebase, not just this one.
 
+### 17. Concurrent RLM sub-agent fan-out self-DoSed the one local model it was meant to protect
+
+**Found while live-verifying Cycle 5** against the spec's own example question ("Summarize all
+outage reports related to payment failures during the last year and identify recurring root
+causes") as an Analyst: `docs/DELIVERY_PLAN.md` had originally called for `rlm_max_depth=2` and
+`rlm_max_concurrent_sub_agents=4` (a plan's `sub_agent` calls could recurse one level into a
+nested plan, and up to four ran concurrently via `rlm/api.py`'s bounded semaphore). The first
+live run never finished: `agents/nodes/response.py` returned `llm_unavailable` — "No LLM
+providers available" — for a question the Retrieval and Tools routes already handled cleanly in
+Cycles 3–4.
+
+**Root cause, in two parts.** First, `rlm_max_depth=2` meant every one of a top-level plan's
+`sub_agent` calls recursed into a **full nested plan-generation cycle** (another `astructured`
+call to `qwen3:4b`) rather than a single leaf analysis — a plan that fanned out to 4 batches via
+`sub_agents` therefore fired 4 concurrent *plan-generation* calls, not the ~4 cheap analysis
+calls the design assumed. Second, and more fundamentally: `qwen3:4b` on this machine's one RTX
+3050 does not serve concurrent requests in parallel — Ollama serializes them. With 4 requests in
+flight at once, three queued long enough to exceed `llm_request_timeout_seconds` (30s) and fail;
+those failures crossed `llm/chain.py`'s circuit-breaker threshold, which then also failed the
+unrelated Response node's own call for the same turn, since only one provider tier is configured
+(`docs/DECISIONS.md` §7). The "bounded semaphore" `docs/ARCHITECTURE.md` describes as protection
+against saturating a single local model was, at `max_concurrent_sub_agents=4`, still four times
+past what this model can actually serve at once.
+
+**Fix:** `Settings.rlm_max_depth` and `Settings.rlm_max_concurrent_sub_agents` both default to
+**1** — every `sub_agent` call bottoms out to a single direct leaf analysis (no nested plan
+generation), and `sub_agents` runs its batches sequentially rather than concurrently. This is
+the same reasoning `docs/DECISIONS.md` §3 already applies to the LLM tier itself ("two model
+tiers cannot co-reside... one model serves every node"), extended to concurrent *requests*
+against that one model rather than concurrent *models*. Sequential execution costs real wall
+time — `rlm_plan_timeout_seconds` was raised from 90s to 180s to match (a run with 4 sequential
+leaf calls plus plan generation, search and aggregation measured 90–150s end to end, live) — but
+completes reliably instead of racing the model against itself. Re-verified live after the fix:
+the identical question completed successfully, with the Agent Activity Panel showing each
+sub-agent call at a distinct timestamp roughly 15–30s apart, not four at once.
+
+A second, narrower bug surfaced in the same investigation: `rlm/executor.py::_run_plan_at_depth`
+reused the top-level plan's `RLMBudget` for its runtime-failure fallback attempt, so a generated
+plan that spent the whole `max_total_sub_agent_calls` budget before failing later in its own code
+left the *deterministic* fallback — the one guarantee `docs/DELIVERY_PLAN.md` asks for — with
+zero budget to spend, degrading it to "(skipped: budget exhausted)" placeholders instead of real
+analysis. Fixed by giving the depth-0 fallback attempt a fresh `RLMBudget`; a nested (depth > 0)
+fallback still shares the parent's budget, since that must remain a true whole-tree cap.
+
+**Why this generalizes:** a bounded semaphore only protects a backend from being *saturated* if
+the bound is set below that backend's actual concurrent capacity — for a single local model on
+consumer GPU hardware, that capacity is 1, not "however many the caller can imagine wanting."
+Raising `rlm_max_depth`/`rlm_max_concurrent_sub_agents` is a config change, not a redesign, for
+any future deployment with an LLM backend that genuinely serves concurrent requests (a cloud
+tier, or multiple resident models) — the recursive, concurrent-capable mechanism this cycle
+built stays fully in place underneath the conservative default.
+
+### 18. The Response node's "no evidence" instruction was unconditional, and misled the model on `"research"`/`"tools"` turns
+
+**Found in the same Cycle 5 live-verification run**, once trade-off 17's fix let a research turn
+actually complete: the final answer flatly stated "No internal documents were consulted" and "no
+relevant evidence was retrieved" — despite the Agent Activity Panel showing four real sub-agent
+findings and a real aggregated summary immediately above it in the same prompt.
+
+**Root cause:** `agents/nodes/response.py`'s system prompt (unchanged since Cycle 3) told the
+model unconditionally: "If no evidence was retrieved, answer from general knowledge and say that
+no internal documents were consulted." That instruction was written against `"retrieval"`/
+`"direct"` turns only, where `retrieved_chunks` empty genuinely does mean nothing was found.
+Cycle 4's `tool_output` and Cycle 5's `research_output` are separate state fields, folded into
+the prompt *after* the Evidence section — so on a `"research"` turn, the prompt legitimately
+read "Evidence: (no evidence retrieved for this turn)" (true — `retrieved_chunks` is
+retrieval-specific) immediately followed by a real "Research findings:" section, while the
+system prompt's blanket instruction told the model to treat the turn as if nothing was found at
+all. The model followed the explicit instruction over the contradicting context and discarded
+real findings.
+
+**Fix:** the "no documents were consulted" instruction now appends only when `retrieved_chunks`,
+`tool_output` **and** `research_output` are all empty (`agents/nodes/response.py::
+_build_system_prompt`, extracted as a pure function specifically so this three-way condition has
+a unit test — `tests/agents/nodes/test_response.py` — pinning the regression rather than relying
+on a future live run to catch it again). Re-verified live: the identical question, on the same
+retrieved evidence, now produces an answer that engages with the research findings directly
+(citing `[Research findings]` and reasoning about the specific dates involved) instead of a
+blanket dismissal.
+
+**Why this generalizes:** a system prompt instruction conditioned on one state field's emptiness
+is only safe while that field is the *only* place evidence can come from. The moment a second
+route (`"tools"`, then `"research"`) added a second evidence channel into the same prompt, the
+unconditional instruction became a latent bug that only a real multi-source turn — not a
+retrieval-only one — could surface; any future evidence channel added to `response_node` should
+extend the same three-way (now, N-way) check rather than reason about `retrieved_chunks` alone.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see
@@ -352,7 +439,9 @@ high priority requirement," which is not a trade worth making here.
   on the argument-filling call and degraded cleanly to a typed `error` event on the stream
   (`api/v1/chat.py`'s existing LLM-failure handling, unchanged by this cycle); an immediate retry
   of the identical question completed in ~20s end to end. Treated as expected variance on this
-  hardware, not a bug — `docs/DECISIONS.md` §3 already prices in 8–15 calls per question.
+  hardware, not a bug — `docs/DECISIONS.md` §3 already prices in 8–15 calls per question. The
+  `"research"` route (Cycle 5) costs more still — 90–150s measured live, see trade-off 17 — since
+  its sub-agent analyses run sequentially against the one local model rather than concurrently.
 - **Answer quality is model-bound**, not design-bound. See trade-off 1.
 - **Synthetic corpus** means retrieval quality is not validated against real enterprise documents.
 - **No evaluation harness.** There is no automated answer-quality benchmark; correctness is verified
