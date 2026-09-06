@@ -147,6 +147,14 @@ routes to `"retrieval"` (already confirmed three times via curl — Cycle 5's ow
 verification, again during Cycle 6, and the RBAC behavior is unchanged by Cycle 7 — see the
 session log) — a nice-to-have the user asked for, not a reason to reorder anything.
 
+This "next action" itself hasn't changed since Cycle 7 finished, but a substantial amount of
+post-completion hardening has: the session log below records several further rounds of
+user-reported bugs found through real use of the deployed app (RLM retrieval-crowding and
+missing-count-capability fixes, a `"tools"`-route data-fabrication risk and its structural fix,
+and a temporal-grounding gap that let the model's own stale sense of "now" distort routing and
+final answers) — read the log's most recent entries, not just this summary, for the current
+actual state of the code.
+
 ---
 
 ## Blocked on — external prerequisites

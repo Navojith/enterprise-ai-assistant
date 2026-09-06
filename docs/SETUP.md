@@ -82,6 +82,8 @@ committed and must stay in sync whenever a variable is added.
 
 | Variable | Purpose |
 | --- | --- |
+| `ENVIRONMENT` | `development` / `production` — read by `core/logging.py` to choose console vs. JSON log rendering |
+| `LOG_LEVEL` | Default `INFO` |
 | `PINECONE_API_KEY` | Pinecone authentication |
 | `PINECONE_DENSE_INDEX` | Dense index name |
 | `PINECONE_SPARSE_INDEX` | Sparse index name |
@@ -90,6 +92,13 @@ committed and must stay in sync whenever a variable is added.
 | `LANGSMITH_TRACING` | `true` to enable tracing |
 | `OLLAMA_BASE_URL` | Default `http://localhost:11434` |
 | `OLLAMA_MODEL` | Default `qwen3:4b` |
+| `LLM_REQUEST_TIMEOUT_SECONDS` | Per-call timeout before `llm/chain.py`'s fallback chain gives up on a request; raised twice live (`docs/DECISIONS.md` §9) |
+| `LLM_STREAM_STALL_TIMEOUT_SECONDS` | How long a streaming response may go with no new token before it's treated as stalled |
+| `LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | Consecutive failures before the circuit breaker opens |
+| `LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | How long the breaker stays open before allowing another attempt |
+| `MAX_VALIDATOR_RETRIES` | Bound on the Validator → Response retry loop (`agents/graph.py`) |
+| `MEMORY_MAX_VERBATIM_MESSAGES` | Verbatim message count that triggers folding the oldest ones into the rolling summary |
+| `MEMORY_SUMMARIZE_BATCH_SIZE` | How many of the oldest messages get folded into the summary per trigger |
 | `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | Postgres connection, assembled into a DSN by `Settings.database_url`. `docker-compose.yml` provisions the container from these same names. |
 | `JWT_SECRET_KEY` | Token signing secret |
 | `JWT_EXPIRE_MINUTES` | Token lifetime |
@@ -101,7 +110,10 @@ committed and must stay in sync whenever a variable is added.
 | `MCP_CONNECT_TIMEOUT_SECONDS` | How long the client waits for the MCP server to become reachable |
 | `MCP_CALL_TIMEOUT_SECONDS` | Per-tool-call timeout once connected |
 | `SANDBOX_TIMEOUT_SECONDS` | Wall-clock budget for one `python_analysis` sandbox execution |
-| `LOG_LEVEL` | Default `INFO` |
+| `RLM_PLAN_TIMEOUT_SECONDS` | Wall-clock budget for one whole research turn (plan generation, sub-agents, aggregation) — raised twice live, `docs/DECISIONS.md` §9 |
+| `RLM_MAX_DEPTH` | How many levels of recursive plan generation a `sub_agent` call may reach — defaults to 1 (sequential-only) for this hardware, `docs/DECISIONS.md` §9 |
+| `RLM_MAX_CONCURRENT_SUB_AGENTS` | Bound on concurrent `sub_agents` fan-out — defaults to 1; raising it self-DoSes the one local model, `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 17 |
+| `RLM_MAX_TOTAL_SUB_AGENT_CALLS` | Whole-tree cap on `sub_agent`/`sub_agents` calls per research turn, shared by reference across every recursive call |
 
 ---
 

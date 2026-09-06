@@ -109,13 +109,15 @@ enterprise-ai-assistant/
 │   │   └── v1/
 │   │       ├── chat.py              # SSE chat stream
 │   │       ├── auth.py              # login, token issue
-│   │       ├── health.py            # liveness / readiness
-│   │       └── admin.py             # admin-only operations
+│   │       └── health.py            # liveness / readiness
 │   ├── core/
 │   │   ├── config.py                # pydantic-settings, env-backed
 │   │   ├── logging.py               # structlog JSON + correlation IDs
 │   │   ├── errors.py                # exception hierarchy + FastAPI handlers
+│   │   ├── db.py                    # AsyncConnectionPool + table creation
+│   │   ├── loop.py                  # Windows selector-event-loop factory (trade-off 8)
 │   │   └── security/
+│   │       ├── users.py             # static user store, hashed passwords
 │   │       ├── jwt.py               # issue / verify
 │   │       ├── rbac.py              # role→permission matrix, Principal
 │   │       └── rate_limit.py        # async per-user token bucket
@@ -126,6 +128,9 @@ enterprise-ai-assistant/
 │   ├── agents/
 │   │   ├── graph.py                 # graph assembly + checkpointer wiring
 │   │   ├── state.py                 # typed AgentState + merge reducers
+│   │   ├── context.py               # GraphContext: settings, store, llm, tool registry
+│   │   ├── principal.py             # Principal reconstruction from checkpointed state
+│   │   ├── prompting.py             # current_date_context: shared temporal grounding (trade-off 31)
 │   │   └── nodes/
 │   │       ├── guardrail.py         # prompt-injection screen, the graph's entry point (Cycle 6)
 │   │       ├── supervisor.py        # intent classification, task decomposition, routing
@@ -163,9 +168,11 @@ enterprise-ai-assistant/
 │       ├── langsmith.py             # explicit LangChainTracer callback + env wiring (Cycle 7)
 │       └── events.py                # re-exports ActivityEvent from shared/events.py (trade-off 25)
 │
-├── mcp_server/                      # mcp.server.mcpserver.MCPServer: employee directory,
-│   │                                 # service catalog, incidents (Streamable HTTP) — Cycle 4
+├── mcp_server/                      # mcp.server.mcpserver.MCPServer over Streamable HTTP — Cycle 4
 │   ├── Dockerfile                   # builds from the repo root, same pattern as backend/Dockerfile
+│   ├── __main__.py                  # process entry point: python -m mcp_server
+│   ├── server.py                    # the MCPServer instance + its six tools (two per dataset)
+│   ├── data.py                      # dummy employee directory / service catalog / incident records
 │   └── config.py                    # this process's own settings — no import of backend.app
 ├── frontend/                        # Streamlit chat + Agent Activity Panel — Cycle 7
 │   ├── Dockerfile                   # builds from the repo root; sets PYTHONPATH=/app for Streamlit
@@ -173,8 +180,8 @@ enterprise-ai-assistant/
 │   └── api_client.py                # typed HTTP/SSE client, reuses ActivityEvent from shared/
 ├── shared/                          # code genuinely shared across processes — nothing else
 │   └── events.py                    # ActivityEvent/ActivityEventType: the one cross-process contract
-├── data/seed/                       # ~60 generated enterprise documents
-├── scripts/                         # ingest, seed generation, admin utilities
+├── data/seed/                       # 64 generated enterprise documents, 224 chunks
+├── scripts/                         # generate_seed_corpus.py, ingest.py
 ├── tests/
 └── docs/                            # this documentation set
 ```
@@ -258,9 +265,14 @@ the UI observes the graph directly rather than being fed a parallel narration.
 
 ### RLM implementation — 10%
 
-The planner emits **real Python** against a curated API (`search`, `filter`, `batch`, `sub_agent`,
-`sub_agents`, `aggregate`). Before execution the code passes an **AST allowlist**: no imports, no
-dunder attribute access, no I/O. Builtins are stripped, execution is wall-clock bounded, and
+The planner emits **real Python** against a curated API (`search`, `filter`, `batch`,
+`group_by_document`, `sub_agent`, `sub_agents`, `aggregate`, `count_by_month`) — the last two
+added after live testing found gaps in the original five: `group_by_document` bin-packs whole
+documents into batches so a sub-agent never sees one incident's sections split apart, and
+`count_by_month` gives a plan a way to return an actual computed tally instead of an LLM's
+prose-only guess at one (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-offs 28–29). Before execution
+the code passes an **AST allowlist**: no imports, no dunder attribute access, no I/O. Builtins
+are stripped, execution is wall-clock bounded, and
 recursion depth and fan-out are hard-capped by a shared `RLMBudget` (`rlm/api.py`) — capable of
 2+ levels of recursive plan generation and multi-way concurrent fan-out, though both default to
 1 on this hardware for a reason verified live, not assumed (`docs/DECISIONS.md` §9). The same
@@ -316,7 +328,12 @@ Async end to end: Pinecone HTTP, Postgres, Ollama streaming, tool execution (inc
 client's Streamable HTTP session), and recursive sub-agent fan-out under a bounded semaphore that
 prevents the RLM from saturating a single local model. The Python Analysis sandbox is the one
 necessary exception — `exec()` is inherently synchronous — and is run on a worker thread via
-`asyncio.wait_for(loop.run_in_executor(...))` rather than blocking the event loop directly.
+`asyncio.wait_for(loop.run_in_executor(...))` rather than blocking the event loop directly, on
+its own dedicated `ThreadPoolExecutor` (`rlm/sandbox.py::_SANDBOX_EXECUTOR`) rather than the
+process's shared default pool — a live security-testing pass found a thread that outlives its
+wall-clock timeout (which can never be forcibly killed once abandoned) would otherwise stall
+every other blocking call in the whole application, not just analytics and research
+(`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 20).
 
 ---
 
@@ -329,6 +346,7 @@ necessary exception — `exec()` is inherently synchronous — and is run on a w
 | Rerank budget exhausted | Silently degrades to pure RRF ordering — quality reduction, never an error or a charge |
 | MCP server down | Tool marked unavailable; supervisor routes around it |
 | Tool timeout | Bounded, cancelled, and reported as a tool failure event |
+| No available tool actually fits the request | Tools node's choice schema always offers an explicit decline option (`agents/nodes/tools.py::_NO_SUITABLE_TOOL`), so the model isn't forced to name an unsuitable tool it then has nothing real to call it with — folds a plain-English explanation into `tool_output` instead (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 30) |
 | RLM plan fails validation | Deterministic fallback plan executes instead |
 | RLM sandbox exceeds its wall-clock budget, or every fallback attempt still fails | Research node catches the typed error and folds a plain-English explanation into `research_output`; the turn still completes rather than failing outright |
 | Rate limit exceeded | Graceful 429 with retry-after |

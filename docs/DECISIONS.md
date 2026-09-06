@@ -521,3 +521,38 @@ timeout), losing that batch's evidence before it ever reached `aggregate` — a 
 the "evidence lost upstream" case this fix does not and cannot cover, exactly as scoped. Full
 narrative of both runs in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's third and fourth
 addenda.
+
+---
+
+## 14. The Tools node's choice schema always offers an explicit decline option
+
+A user reported `python_analysis` failing with `NameError: name 'python_analysis' is not
+defined` on a question the `"tools"` route has no way to actually serve — it has no retrieval
+step, so with nothing real to compute over, the model either echoed the tool's own name back as
+literal (non-runnable) code, or fabricated an entirely invented dataset and confidently computed
+over it as if real (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 30). Three options were put to
+the user rather than one picked unilaterally: sharpen the routing/tool-description prompts alone;
+sharpen them plus add an anti-fabrication instruction as a fill-args-level safety net; or a
+structural fix, adding an explicit "no suitable tool" option to `agents/nodes/tools.py::
+_build_choice_schema`'s `Literal` so the model is never forced to name a tool at all. The user
+chose the prompt-level fix first, then — after live re-verification showed the fill-args safety
+net alone did not reliably prevent fabrication, and that the choice schema had no way to express
+"none of these fit" even when the model's own `reasoning` field said exactly that — explicitly
+asked for the structural fix on top.
+
+**Why this is the right layer to fix it at, not just a prompt.** Prompting can make a wrong
+choice *less likely*; it cannot make a *forced* choice safe, because the schema itself defines
+the space of things the model is even allowed to say. Adding `_NO_SUITABLE_TOOL` to the
+`Literal` alongside the real tool names — always, regardless of which tools a role has — removes
+the forcing function directly: `tools_node` short-circuits on that choice before the fill-args
+call ever runs, so there is no `code`/`data` for the model to fabricate in the first place. This
+mirrors §10's classifier-escalation reasoning applied to a different layer: don't rely on
+prompting to prevent a model from doing something it structurally *can* still do; change what it
+can do instead.
+
+**Live-verified, not assumed to close the gap**: the real choice-stage call, 8 times for the
+identical question, now declines via `_NO_SUITABLE_TOOL` 7 of 8 times (vs. 0 of 3 before this
+fix existed); the real `tools_node` function itself, 5 times in a row, produced the clean
+short-circuit every time — correct event sequence, no fill-args call, no chance to fabricate.
+Not claimed as eliminating the risk entirely: the 1-of-8 residual case is recorded, not smoothed
+over, in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 30's addendum.
