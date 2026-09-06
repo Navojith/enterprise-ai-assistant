@@ -15,6 +15,17 @@ Every failure mode here — no tools available for this role, the model picks a 
 execution-boundary re-check still rejects, a tool times out or errors — degrades to a plain
 English explanation folded into `tool_output` for the Response node to relay, never a crash and
 never a silent gap (`docs/ARCHITECTURE.md`'s "Failure and degradation" table).
+
+`_build_choice_schema`'s `Literal` always includes `_NO_SUITABLE_TOOL` alongside the real tool
+names, so the model can say "none of these actually help" instead of being structurally forced
+to name one anyway. Added after live testing found the forced choice was a real gap, not a
+theoretical one: routed here for a question needing real corpus data it did not have, the
+model's own `reasoning` field sometimes concluded, verbatim, that no available tool could help —
+and was still made to pick `python_analysis` regardless, which then fabricated data to have
+something to compute over (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 30). This is a
+structural fix, not a prompting one: even if the routing-level and tool-level prompt guidance
+this same investigation added (`agents/nodes/supervisor.py`, `tools/python_analysis.py`) fails
+to steer the model away from a bad choice, the schema itself now offers a graceful way out.
 """
 
 from __future__ import annotations
@@ -36,10 +47,15 @@ from backend.app.tools.registry import ToolSpec
 
 logger = structlog.get_logger(__name__)
 
+_NO_SUITABLE_TOOL = "no_suitable_tool"
+
 _CHOOSE_TOOL_PROMPT = (
     "You are choosing which tool to call to help answer the user's latest message. Pick "
     "exactly one tool from the ones offered below, and give one sentence of reasoning before "
-    "your choice.\n\nAvailable tools:\n{tool_descriptions}"
+    "your choice. If none of them can actually help — for example, the request needs "
+    "information to be searched, retrieved, or looked up first, and no tool here can do "
+    f"that on its own — choose {_NO_SUITABLE_TOOL!r} instead of forcing an unsuitable one.\n\n"
+    "Available tools:\n{tool_descriptions}"
 )
 
 _FILL_ARGS_PROMPT = (
@@ -54,16 +70,26 @@ def _describe_tools(specs: list[ToolSpec]) -> str:
 
 def _build_choice_schema(specs: list[ToolSpec]) -> type[BaseModel]:
     """A fresh `Literal[...]` schema per call, built from whatever tools this principal's role
-    currently offers — never a fixed enum of every tool in the registry, so the model is
-    structurally unable to even express choosing a tool bind-time filtering already excluded."""
-    tool_names = tuple(spec.name for spec in specs)
+    currently offers plus `_NO_SUITABLE_TOOL` — never a fixed enum of every tool in the
+    registry, so the model is structurally unable to even express choosing a tool bind-time
+    filtering already excluded, but always able to decline rather than being forced to name one
+    that doesn't actually fit (see the module docstring's note on why this exists)."""
+    tool_names = (*(spec.name for spec in specs), _NO_SUITABLE_TOOL)
     return create_model(
         "ToolChoice",
         reasoning=(
             str,
             Field(description="One sentence on which tool best helps, chosen before naming it."),
         ),
-        tool_name=(Literal[tool_names], Field(description="The chosen tool's name.")),
+        tool_name=(
+            Literal[tool_names],
+            Field(
+                description=(
+                    f"The chosen tool's name, or {_NO_SUITABLE_TOOL!r} if none of the "
+                    "available tools can actually help with this request."
+                )
+            ),
+        ),
     )
 
 
@@ -95,7 +121,6 @@ async def tools_node(state: AgentState, runtime: Runtime[GraphContext]) -> dict[
     )
     choice = await llm.astructured(choice_messages, schema=choice_schema, reasoning=False)
     tool_name: str = choice.tool_name  # type: ignore[attr-defined]
-    spec = next(spec for spec in specs if spec.name == tool_name)
     writer(
         ActivityEvent(
             event_type=ActivityEventType.REASONING,
@@ -104,6 +129,16 @@ async def tools_node(state: AgentState, runtime: Runtime[GraphContext]) -> dict[
             data={"tool_name": tool_name},
         )
     )
+
+    if tool_name == _NO_SUITABLE_TOOL:
+        message = (
+            "None of the available tools can fulfil this request — it likely needs internal "
+            "document search or a broader research investigation instead of a direct tool call."
+        )
+        writer(ActivityEvent(event_type=ActivityEventType.ERROR, node="tools", message=message))
+        return {"tool_output": message}
+
+    spec = next(spec for spec in specs if spec.name == tool_name)
 
     args_messages = build_context_messages(
         system_prompt=_FILL_ARGS_PROMPT.format(

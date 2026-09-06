@@ -495,6 +495,24 @@ mechanism) rather than requiring any new paid service.
 
 Newest first. One line per meaningful change.
 
+- **2026-09-06** — At the user's explicit request, closed the structural gap the previous entry
+  identified but left open: `agents/nodes/tools.py::_build_choice_schema`'s `Literal` now always
+  includes a sentinel, `_NO_SUITABLE_TOOL = "no_suitable_tool"`, alongside the real tool names,
+  so the model can decline instead of being forced to name a tool that doesn't fit; `tools_node`
+  short-circuits on that choice before the fill-args call, returning the same kind of graceful
+  `tool_output` message every other degradation path here already uses. Live-verified, not just
+  schema-tested: calling the real choice-stage LLM call directly 8 times for the identical
+  question, **7 of 8** now declined via `no_suitable_tool` (vs. 0 of 3 pre-fix); calling the real
+  `tools_node` function itself end to end 5 times in a row, **all 5** produced the clean
+  short-circuit (correct `node_entered` → `reasoning` → `error` event sequence, no fill-args
+  call, no chance to fabricate). Reported honestly rather than as a complete fix: the 1-of-8
+  residual case shows this doesn't make the choice step perfectly reliable, only gives it an
+  escape hatch it lacked before — combined with the already-verified routing-level fix, the
+  realistic end-to-end risk is now the product of two independently-unlikely events rather than
+  one likely one. Full detail as an addendum to `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off
+  30. 3 new tests (386 total, up from 384); `ruff`, `ruff format`, `mypy --strict` all pass
+  clean.
+
 - **2026-09-06** — Found and partially fixed a second, distinct bug in the `"tools"` route,
   surfaced live-testing the previous entry's fix through the actual deployed app: the identical
   question sometimes routed to `"tools"` instead of `"research"`/`"retrieval"` (model-routing

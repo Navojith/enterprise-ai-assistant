@@ -1505,3 +1505,33 @@ stronger fix (a "no suitable tool" option in the choice schema, and/or `tools_no
 execute `python_analysis` outright when `data` is empty for a question that looks
 evidence-dependent) was offered to the user as the next step, not assumed necessary or applied
 without asking.
+
+**Addendum, same investigation: the user chose the structural fix.** `agents/nodes/tools.py::
+_build_choice_schema`'s `Literal` now always includes a sentinel, `_NO_SUITABLE_TOOL =
+"no_suitable_tool"`, alongside the real tool names — the model can say "none of these actually
+help" instead of being structurally forced to name one. `tools_node` short-circuits on that
+choice before ever reaching the fill-args call, returning the same kind of plain-English
+`tool_output` message every other degradation path here already uses ("no tools are available",
+"the MCP server is unreachable", ...), so the Response node relays it exactly like any other
+graceful failure rather than needing a special case.
+
+**Live-verified, not just schema-tested**: calling the real choice-stage LLM call directly, 8
+times, for the identical question with the full Analyst tool set — **7 of 8** now chose
+`no_suitable_tool` (only 1 still chose `python_analysis`), a large improvement over the pre-fix
+0 of 3 in trade-off 30's original finding. Then, calling the real `tools_node` function itself
+end to end (not just the schema in isolation) 5 times in a row: **all 5** produced the clean
+short-circuit — the correct `ActivityEvent` sequence (`node_entered` → `reasoning` → `error`,
+never reaching a `tool_call` event at all) and the graceful `tool_output` message, with no
+fill-args call and so no chance to fabricate data. This closes the specific gap trade-off 30
+identified as unaddressed, without needing to touch the fill-args prompt or the routing prompt
+again — the escape hatch is available at exactly the point the model was previously trapped.
+
+Still an honestly bounded fix, consistent with this file's framing throughout: the 1-of-8
+residual case where the model still chose `python_analysis` shows this does not make the choice
+step perfectly reliable (trade-off 1's model-bound variance), only gives it a way out it did not
+have before. Combined with the routing-level fix already verified working well (trade-off 30's
+5-of-5), the realistic end-to-end risk of a live turn reaching fabricated data is now the product
+of two independently-unlikely events rather than one likely one — a meaningfully different risk
+profile, not a claim of zero residual risk. 3 new tests (386 total, up from 384 — `_NO_SUITABLE_
+TOOL` always validating, including with no real tools offered at all); `ruff`, `ruff format`,
+`mypy --strict` all pass clean.
