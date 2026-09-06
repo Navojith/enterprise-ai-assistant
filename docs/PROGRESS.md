@@ -503,6 +503,40 @@ mechanism) rather than requiring any new paid service.
 
 Newest first. One line per meaningful change.
 
+- **2026-09-07** — Rewrote `docs/DEMO_SCRIPT.md` at the user's request ("lots of outdated
+  stuff"), reconciling it against the real current state rather than its Cycle 7 snapshot: the
+  test count (334 → 391), the `LLM_REQUEST_TIMEOUT_SECONDS` figure quoted in the "occasional
+  timeouts" pre-flight note (30s → 90s, per trade-off 27), and — the substantive fix, not just
+  numbers — the wrap-up segment's flatly wrong claim that containerization was "not built," when
+  the bonus-points table below shows it shipped weeks ago; moved to "built beyond the required
+  minimum" alongside the MCP server and reranking, with its disclosed `host.docker.internal`
+  caveat named rather than glossed over. Rebalanced the whole 45-minute timeline around the RLM
+  segment's real measured latency (90–350s, a 750s ceiling — the previous script's "90–150s"
+  figure and 7-minute slot both predate the timeout/budget escalations `docs/DELIVERY_PLAN.md`'s
+  risk register now documents): widened that segment 7 → 9 minutes by trimming 2 minutes from
+  code-quality and graceful-degradation, which only ever needed to *fit* in their slots, not fill
+  them. Refreshed the assumptions/trade-offs talking points to include the most recent, most
+  narratively load-bearing findings (trade-off 26/27's RLM retrieval-crowding and timeout
+  investigation, trade-off 31's temporal-grounding bug root-caused from a user-supplied LangSmith
+  trace) in place of a couple of the original, less demo-relevant ones. Added a pre-flight step
+  recommending a timed dry run of the RLM question before recording, and an explicit
+  native-over-Docker-Compose recommendation for the recording itself, both carried over from the
+  same-day `docs/DELIVERY_PLAN.md` update below. Cross-references between the two documents
+  (segment timestamps, the "7-minute" figure) were updated to match. No code changed; not
+  committed, per instruction.
+- **2026-09-07** — Rewrote `docs/DELIVERY_PLAN.md`, which had stayed in its original pre-build,
+  all-cycles-pending form even though every cycle finished and was live-verified weeks ago per
+  this file. It now doubles as the live-demo readiness record: each cycle marked ✅ with what
+  actually shipped versus what was planned, a new "What changed after Cycle 5 shipped" section
+  consolidating the RLM route's several post-completion hardening passes (timeouts, department
+  scoping, batching, the aggregate-completeness retry) into one place instead of leaving it
+  scattered across session-log entries, a risk register rewritten with real measured numbers
+  instead of the original pre-build guesses (most notably: research-route latency, originally
+  budgeted 60–90s for the whole system, now legitimately 90–350s with a 750s ceiling — flagged as
+  the single biggest pacing risk against `docs/DEMO_SCRIPT.md`'s RLM segment), all 8
+  acceptance criteria checked off against their live verification, and a new "Live demo readiness"
+  section surfacing the deliverables checklist below (public repo, video, traces) as what actually
+  remains. No code changed.
 - **2026-09-07** — Fixed a user-reported confidently wrong refusal, root-caused via the full
   LangSmith trace the user provided rather than guessed at: "Run a Python analysis to count how
   many payment incidents happened per month in 2026" was routed to `"direct"` (skipping
