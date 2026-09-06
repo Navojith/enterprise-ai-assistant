@@ -14,16 +14,16 @@ This runbook defines the standard operating procedure for the human resources on
 
 ## Detection
 
-This condition is typically surfaced by an automated alert tied to an elevated error rate, latency, or queue-depth threshold specific to the affected system.
+The HR system generates an offboarding ticket automatically once a termination date is recorded, listed on the Offboarding Queue dashboard.
 
 ## Response Steps
 
-1. Acknowledge the alert and confirm the affected system.
-2. Check the system's current health dashboard for corroborating signals before taking action.
-3. Apply the documented mitigation for this failure mode.
-4. Confirm recovery against the same signal that triggered the alert.
-5. Open a follow-up ticket for any remediation that could not be completed during the incident.
+1. Confirm the employee's last working day and required access-revocation time from the offboarding ticket.
+2. Disable the employee's single sign-on account at the scheduled revocation time.
+3. Revoke access to any system not covered by single sign-on, using the employee's system access list from the identity platform.
+4. Confirm the employee's physical badge access is deactivated with the facilities team.
+5. Mark the offboarding ticket complete once every access-list item is confirmed revoked.
 
 ## Escalation
 
-If the mitigation does not restore normal operation within the runbook's expected recovery window, escalate to the platform engineering on-call rotation.
+If the offboarding is involuntary and flagged as high-risk, escalate to the security team to revoke access immediately rather than waiting for the scheduled time.

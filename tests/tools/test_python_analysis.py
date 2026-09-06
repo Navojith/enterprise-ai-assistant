@@ -47,3 +47,23 @@ class TestPythonAnalysisTool:
 
         with pytest.raises(ToolExecutionError):
             await registry.execute("python_analysis", {"code": "import os"}, principal=_ANALYST)
+
+    def test_the_tool_description_warns_it_cannot_retrieve_data(self) -> None:
+        """`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 29's second finding: live testing found
+        the model, routed here with no real data available, fabricated an entirely invented
+        dataset rather than admit it had nothing to analyze. This description (shown at both
+        tool-choice and fill-args time, `agents/nodes/tools.py`) is the safety net for whenever
+        the Supervisor's own routing prompt still sends a question here that needs it."""
+        spec = build_python_analysis_tool(timeout_seconds=1.0)
+
+        assert "Cannot search, retrieve, or look up" in spec.description
+
+    def test_the_field_descriptions_forbid_inventing_placeholder_data(self) -> None:
+        schema = build_python_analysis_tool(timeout_seconds=1.0).params_schema.model_fields
+        code_description = schema["code"].description
+        data_description = schema["data"].description
+
+        assert code_description is not None and "do NOT invent" in code_description
+        assert (
+            data_description is not None and "cannot search or retrieve records" in data_description
+        )

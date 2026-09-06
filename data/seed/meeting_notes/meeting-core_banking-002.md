@@ -18,4 +18,4 @@ The group reviewed the current status related to "Core Banking Architecture Revi
 
 ## Action Items
 
-Action items were assigned with owners and target dates, to be followed up on in the next recurring sync.
+The team agreed to document the current replication topology for the ledger database, to evaluate whether the batch settlement pipeline needs an additional standby region, and to revisit the review findings at the next quarterly architecture sync.

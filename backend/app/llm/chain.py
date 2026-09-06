@@ -114,6 +114,7 @@ class FallbackChain:
         *,
         schema: type[SchemaT],
         reasoning: bool = False,
+        temperature: float | None = None,
     ) -> SchemaT:
         last_error: LLMError | None = None
         for index, (provider, breaker) in enumerate(self._entries):
@@ -121,7 +122,9 @@ class FallbackChain:
                 logger.warning("llm_provider_skipped_breaker_open", provider_index=index)
                 continue
             try:
-                result = await provider.astructured(messages, schema=schema, reasoning=reasoning)
+                result = await provider.astructured(
+                    messages, schema=schema, reasoning=reasoning, temperature=temperature
+                )
             except LLMError as exc:
                 breaker.record_failure()
                 last_error = exc

@@ -14,8 +14,8 @@ On 2025-12-20, the core banking team responded to an incident involving ledger r
 
 ## Impact
 
-Impact was contained to internal operations and a subset of customer-facing functionality for the duration of the incident.
+Overnight reconciliation reports were delayed by several hours, so the finance team did not have the morning settlement summary available at the usual time; no customer-facing systems were affected.
 
 ## Resolution
 
-The team applied the relevant runbook, restored normal operation, and scheduled a follow-up review to assess whether additional safeguards were warranted.
+The team identified a lock contention issue between the reconciliation job and a concurrent reporting query, killed the blocking query, and restarted the batch job from its last checkpoint. It completed successfully before the extended deadline.

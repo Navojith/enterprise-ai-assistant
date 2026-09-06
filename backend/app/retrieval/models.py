@@ -93,12 +93,15 @@ class DocumentMetadata(BaseModel):
     created_date: date
 
 
-def compute_content_hash(*, document_id: str, section: str, text: str) -> str:
+def compute_content_hash(*, document_id: str, section: str, title: str, text: str) -> str:
     """A stable fingerprint of one chunk's content, used to skip re-embedding unchanged
     chunks on re-ingestion (docs/DECISIONS.md §4 cost guard). Keyed on `document_id` and
     `section` too, not just `text`, so two different sections that happen to contain identical
-    text do not collide."""
-    digest_input = f"{document_id}\x1f{section}\x1f{text}".encode()
+    text do not collide. `title` is included because `Chunk.to_pinecone_record` embeds it as
+    part of the indexed text (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26) — a title
+    change with no text change still changes what gets embedded, and must not be silently
+    skipped as "unchanged" by the idempotency check."""
+    digest_input = f"{document_id}\x1f{section}\x1f{title}\x1f{text}".encode()
     return hashlib.sha256(digest_input).hexdigest()
 
 
@@ -129,7 +132,9 @@ class Chunk(BaseModel):
             document_id=document_id,
             section=section,
             text=text,
-            content_hash=compute_content_hash(document_id=document_id, section=section, text=text),
+            content_hash=compute_content_hash(
+                document_id=document_id, section=section, title=metadata.title, text=text
+            ),
             metadata=metadata,
         )
 
@@ -139,11 +144,25 @@ class Chunk(BaseModel):
         fields. `created_date` is stored both as an ISO string (for display/citation) and as a
         Unix-epoch integer (`created_date_epoch`) so a future numeric range filter — Pinecone's
         filter DSL does not support ordering on strings — has something to compare against.
+
+        `chunk_text` — the field the index's `field_map` actually embeds — carries the
+        document's title and this chunk's section name ahead of its body
+        (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26), not the bare body alone. Verified
+        live that without this, a chunk whose body text is generic (several of this corpus's
+        runbook sections are near-identical across documents by design — see
+        `scripts/generate_seed_corpus.py`) is close to unfindable by a query that names the
+        document or section directly, because neither word appears anywhere in what was
+        actually embedded. `section_text` carries the plain, unprefixed body separately, so
+        `PineconeStore.search` can hand back the original text for display and citation —
+        `RetrievedChunk.text` must stay exactly what `Chunk.text` was, not the embedding-only
+        prefixed form.
         """
         created_at = datetime.combine(self.metadata.created_date, datetime.min.time(), tzinfo=UTC)
+        embedded_text = f"{self.metadata.title} — {self.section}\n\n{self.text}"
         return {
             "_id": self.chunk_id,
-            "chunk_text": self.text,
+            "chunk_text": embedded_text,
+            "section_text": self.text,
             "document_id": self.document_id,
             "section": self.section,
             "content_hash": self.content_hash,

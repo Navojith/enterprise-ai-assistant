@@ -14,12 +14,12 @@ This document describes the architecture of the system covered by "Fraud Detecti
 
 ## Components
 
-The system is composed of a request-handling service layer, a persistence layer backed by a managed relational database, and an asynchronous event stream used to propagate state changes to downstream consumers.
+The service is composed of a real-time scoring engine evaluating each transaction against a rules and machine-learning model ensemble, a feature store supplying recent account history, and a case-management interface for manual review of flagged transactions.
 
 ## Reliability Considerations
 
-The system is designed to degrade gracefully under partial failure: downstream dependencies are called with bounded timeouts and circuit breakers, and critical paths have a documented fallback behavior rather than failing the entire request.
+The scoring engine is configured to fail closed for high-value transactions but fail open with a conservative default score for lower-risk transactions, so a scoring-engine outage degrades fraud coverage rather than blocking all payments outright.
 
 ## Related Runbooks
 
-Operational procedures for responding to failures in this system are maintained separately in the corresponding runbook documents.
+Operational procedures for this system are covered by the following runbooks: "Credential-Stuffing Response Runbook"; "Certificate Rotation Runbook".

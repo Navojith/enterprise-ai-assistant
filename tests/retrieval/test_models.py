@@ -74,9 +74,41 @@ def test_to_pinecone_record_carries_the_required_metadata_schema() -> None:
     record = chunk.to_pinecone_record()
 
     assert record["_id"] == chunk.chunk_id
-    assert record["chunk_text"] == "policy text"
     assert record["department"] == "security"
     assert record["document_type"] == "incident"
     assert record["access_level"] == "confidential"
     assert record["created_date"] == "2026-01-01"
     assert isinstance(record["created_date_epoch"], int)
+
+
+def test_to_pinecone_record_embeds_title_and_section_but_preserves_plain_text() -> None:
+    """`chunk_text` is what the index actually embeds and must carry the document's title and
+    section name (trade-off 26) — without it, a chunk whose body text is generic on its own
+    (as several of this corpus's runbook sections deliberately are) is nearly unfindable by a
+    query that names the document or section directly. `section_text` must stay the plain
+    body, since `PineconeStore.search` reads it back as `RetrievedChunk.text` for display and
+    citation."""
+    metadata = _metadata(title="Test Document")
+    chunk = Chunk.create(
+        document_id="doc-1", section="Purpose", text="policy text", metadata=metadata
+    )
+
+    record = chunk.to_pinecone_record()
+
+    assert record["chunk_text"] == "Test Document — Purpose\n\npolicy text"
+    assert record["section_text"] == "policy text"
+
+
+def test_content_hash_changes_when_only_the_title_changes() -> None:
+    """The title is embedded as part of `chunk_text` (trade-off 26), so a title-only change
+    must not be treated as "unchanged" by the idempotency check, or the re-embedded index
+    would silently drift from what re-ingestion believes it already has."""
+    text, section = "same text", "Purpose"
+    a = Chunk.create(
+        document_id="doc-1", section=section, text=text, metadata=_metadata(title="Title A")
+    )
+    b = Chunk.create(
+        document_id="doc-1", section=section, text=text, metadata=_metadata(title="Title B")
+    )
+
+    assert a.content_hash != b.content_hash

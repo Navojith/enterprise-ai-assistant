@@ -14,8 +14,8 @@ Customers and internal stakeholders have identified a need addressed by "Payment
 
 ## Requirements
 
-The feature must be available across supported platforms, must degrade gracefully when a dependent service is unavailable, and must be observable enough to diagnose issues in production without requiring a code change.
+Every client-initiated retry of a payment request must carry the same idempotency key as the original attempt, the system must return the original transaction's result rather than creating a duplicate when a retried key is recognized, and idempotency keys must be retained for at least 24 hours after the original request.
 
 ## Out of Scope
 
-This specification does not cover changes to unrelated systems; any dependency identified during implementation should be raised as a separate specification.
+This specification does not cover retries initiated by the card network itself after settlement, which are handled by the reconciliation process instead.

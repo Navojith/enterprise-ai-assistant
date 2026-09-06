@@ -48,7 +48,12 @@ class _FakeProvider:
         self.calls = 0
 
     async def astructured(
-        self, messages: Sequence[BaseMessage], *, schema: type[SchemaT], reasoning: bool = False
+        self,
+        messages: Sequence[BaseMessage],
+        *,
+        schema: type[SchemaT],
+        reasoning: bool = False,
+        temperature: float | None = None,
     ) -> SchemaT:
         self.calls += 1
         if self._astructured_error:

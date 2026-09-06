@@ -147,6 +147,14 @@ routes to `"retrieval"` (already confirmed three times via curl — Cycle 5's ow
 verification, again during Cycle 6, and the RBAC behavior is unchanged by Cycle 7 — see the
 session log) — a nice-to-have the user asked for, not a reason to reorder anything.
 
+This "next action" itself hasn't changed since Cycle 7 finished, but a substantial amount of
+post-completion hardening has: the session log below records several further rounds of
+user-reported bugs found through real use of the deployed app (RLM retrieval-crowding and
+missing-count-capability fixes, a `"tools"`-route data-fabrication risk and its structural fix,
+and a temporal-grounding gap that let the model's own stale sense of "now" distort routing and
+final answers) — read the log's most recent entries, not just this summary, for the current
+actual state of the code.
+
 ---
 
 ## Blocked on — external prerequisites
@@ -355,7 +363,10 @@ since the test environment has no `PINECONE_API_KEY`.
 - [x] `rlm/executor.py` — recursion depth + fan-out caps via one `RLMBudget` shared by
       reference across the whole recursive tree, bounded semaphore for concurrent fan-out
 - [x] Result aggregator — `aggregate(findings, question)`, one LLM call synthesizing every
-      sub-agent finding into `{"summary": ..., "recurring_themes": [...]}`
+      sub-agent finding into `{"summary": ..., "recurring_themes": [...]}`. A later session
+      added a citation-completeness check and bounded (at most one) retry on top of this,
+      after live investigation found aggregation could silently drop a sub-agent's evidence
+      during synthesis — see `docs/DECISIONS.md` §13
 - [x] Deterministic fallback plan when generated code fails validation *or* fails at runtime
       after validating — `rlm/planner.py::deterministic_fallback_plan`, given a **fresh**
       `RLMBudget` at depth 0 so a failed generated attempt can't leave the fallback with
@@ -492,6 +503,328 @@ mechanism) rather than requiring any new paid service.
 
 Newest first. One line per meaningful change.
 
+- **2026-09-07** — Fixed a user-reported confidently wrong refusal, root-caused via the full
+  LangSmith trace the user provided rather than guessed at: "Run a Python analysis to count how
+  many payment incidents happened per month in 2026" was routed to `"direct"` (skipping
+  retrieval entirely) and answered that the year "has not yet occurred" — the trace's own
+  captured reasoning showed why: `qwen3:4b`'s own stale, pre-cutoff sense of "now" (its
+  reasoning stated outright "the current year is 2023") had never been corrected by anything in
+  any system prompt. Fixed with a new shared, pure helper, `agents/prompting.py::
+  current_date_context(now: datetime)`, added to every prompt that reasons about the user's
+  request and could be distorted by a wrong sense of time: `agents/nodes/supervisor.py`'s
+  routing prompt, `agents/nodes/response.py`'s final-answer prompt, and `rlm/planner.py`'s plan
+  prompt. Live-verified, not just unit-tested: the real Supervisor routing call, 5 times for the
+  identical question, now correctly routes to `"retrieval"`/`"research"` 4 of 5 times (vs. the
+  original false-premise refusal every time before); the 1 residual attempt reasoned from the
+  *correct* date but made a narrower, more defensible mistake (confusing "this year isn't over
+  yet" with "no data can exist"), not the original false premise. The Response node, called
+  directly with no evidence, now says "No internal documents were consulted" — correct — instead
+  of fabricating a false reason. 6 new tests (391 total, up from 386); `ruff`, `ruff format`,
+  `mypy --strict` all pass clean. Full investigation in `docs/ASSUMPTIONS_AND_TRADEOFFS.md`
+  trade-off 31.
+
+- **2026-09-06** — At the user's explicit request, closed the structural gap the previous entry
+  identified but left open: `agents/nodes/tools.py::_build_choice_schema`'s `Literal` now always
+  includes a sentinel, `_NO_SUITABLE_TOOL = "no_suitable_tool"`, alongside the real tool names,
+  so the model can decline instead of being forced to name a tool that doesn't fit; `tools_node`
+  short-circuits on that choice before the fill-args call, returning the same kind of graceful
+  `tool_output` message every other degradation path here already uses. Live-verified, not just
+  schema-tested: calling the real choice-stage LLM call directly 8 times for the identical
+  question, **7 of 8** now declined via `no_suitable_tool` (vs. 0 of 3 pre-fix); calling the real
+  `tools_node` function itself end to end 5 times in a row, **all 5** produced the clean
+  short-circuit (correct `node_entered` → `reasoning` → `error` event sequence, no fill-args
+  call, no chance to fabricate). Reported honestly rather than as a complete fix: the 1-of-8
+  residual case shows this doesn't make the choice step perfectly reliable, only gives it an
+  escape hatch it lacked before — combined with the already-verified routing-level fix, the
+  realistic end-to-end risk is now the product of two independently-unlikely events rather than
+  one likely one. Full detail as an addendum to `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off
+  30. 3 new tests (386 total, up from 384); `ruff`, `ruff format`, `mypy --strict` all pass
+  clean.
+
+- **2026-09-06** — Found and partially fixed a second, distinct bug in the `"tools"` route,
+  surfaced live-testing the previous entry's fix through the actual deployed app: the identical
+  question sometimes routed to `"tools"` instead of `"research"`/`"retrieval"` (model-routing
+  variance), chose `python_analysis`, and failed with `NameError: name 'python_analysis' is not
+  defined`. Root-caused, live, to something worse than a crash: `agents/nodes/tools.py::
+  tools_node` never retrieves anything at all, so with no real data available the model either
+  echoed the tool's own name back as literal code (the exact error) or **fabricated an entirely
+  invented dataset** and confidently computed over it as if real — a hallucination risk in a
+  different shape than the citation guardrails already cover. Presented 3 fix options to the
+  user rather than picking one; the user chose sharpening the Supervisor's routing prompt (the
+  `ANALYTICS_TOOLS` category text now says "tools" fits only values already stated in the
+  conversation, never a corpus lookup/count) plus an anti-fabrication instruction in
+  `tools/python_analysis.py`'s tool description and field descriptions. Live re-verification,
+  done honestly rather than assumed: **the routing fix works well** — 0 of 5 live attempts with
+  the full Analyst tool set chose `"tools"` for this question, all correctly reasoning it needs
+  retrieval/research first — but **the fill-args safety net, tested in isolation (forcing the
+  route to `"tools"` as if the routing fix had failed), did not reliably prevent fabrication**:
+  2 of 3 attempts still echoed the tool's own name as literal code, the third fabricated a
+  dataset anyway. Also found, live: `agents/nodes/tools.py::_build_choice_schema` structurally
+  cannot express "no tool fits" — one attempt's own reasoning concluded exactly that, verbatim,
+  and was still forced to name a tool. Net assessment stated plainly rather than smoothed over:
+  the fix meaningfully reduces how often this failure mode is reached, does not eliminate the
+  fabrication risk for whatever residual fraction of turns still reach `"tools"` this way — a
+  stronger structural fix (a "no suitable tool" choice-schema option, or `tools_node` refusing
+  outright when `data` is empty) was offered as a next step, not applied unilaterally. Full
+  investigation in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 30. 3 new tests (384 total, up
+  from 381 — the sharpened category text's wording, and `python_analysis`'s tool/field
+  descriptions); `ruff`, `ruff format`, `mypy --strict` all pass clean.
+- **2026-09-06** — Fixed a user-reported bad "research"-route answer ("Run a Python analysis to
+  count how many payment incidents happened per month last year?" as an Analyst, answered "no
+  payment incidents were recorded for any month last year") by reproducing it live against real
+  Pinecone rather than guessing, per the LangSmith trace the user provided. Found two independent,
+  compounding problems, presented both to the user with concrete fix options and a recommendation
+  rather than picked unilaterally, and implemented what the user chose. **Problem 1**: the
+  Supervisor guessed the wrong department (`product` instead of `payments` — the corpus's
+  "Instant Payments Feature Specification" lives under `product`), and `rlm/api.py::build_search`'s
+  merge budget (`top_k`, not doubled like `agents/nodes/retrieval.py`'s `_MERGED_TOP_K`) let that
+  wrong guess's fully-padded scoped result crowd out 100% of the correct all-department result —
+  live-verified strictly worse than no department-scoping at all. Fixed by widening the merge
+  budget to `top_k * 2` (matching `retrieval_node`'s already-proven pattern) — the user chose this
+  over a narrower, `top_k`-preserving quota fix after live testing showed the narrower option
+  would not have recovered this specific case (the real evidence was buried too deep, rank ~18-38
+  of a fully-ranked corpus). Also tightened the Supervisor's routing prompt to reduce this specific
+  department/keyword confusion. **Problem 2**, fixed alongside at the user's request: `aggregate()`
+  is one LLM call producing prose, never a computed count, so nothing in the RLM path could answer
+  a counting question numerically even with correct retrieval. Added `count_by_month(chunks) ->
+  dict[str, int]` to the curated RLM API (counts distinct documents, not chunks, per month) and
+  taught `rlm/planner.py`'s system prompt to use it (or plain Python counting) for tally-style
+  questions instead of trusting `aggregate()` to state a number — and fixed a related bug the same
+  work surfaced: `agents/nodes/research.py::_stringify_research_result` only ever rendered a
+  result's `summary`/`recurring_themes` keys, so a plan's computed count would have been silently
+  dropped from the final answer; now renders any other populated key too. Both changes documented
+  in full, including the rejected RRF-merge alternative and its measurements, in
+  `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 29 and `docs/DECISIONS.md` §9 (a fourth addition).
+  Honestly disclosed, not silently left implied: `deterministic_fallback_plan` — which fires on
+  most live research turns per trade-off 28 — is one fixed, question-agnostic template with no
+  counting logic, so a counting question that falls through to it still gets a prose estimate, not
+  a number, until the model's own generated code succeeds. 8 new/updated tests (381 total, up from
+  373 — `count_by_month`'s bucketing/dedup/malformed-input behavior, the exact crowding-regression
+  shape via a new `build_search` test, and `_stringify_research_result`'s extra-field rendering);
+  `ruff`, `ruff format`, `mypy --strict` all pass clean. Live-verified against real Ollama and
+  Pinecone (`execute_research` called directly with the user's exact question, `get_stream_writer`
+  stubbed since this ran outside a graph invocation): with the department forced back to the
+  original trace's exact wrong guess (`"product"`), the model's own generated plan spontaneously
+  used `count_by_month` on the first attempt and returned a real computed tally (6 incidents
+  across 5 months) — a complete change in kind from "no payment incidents were recorded." Repeating
+  with the correct department (`"payments"`) returned a materially more complete tally summing to
+  13 — the corpus's actual full count — confirming the fix's real benefit (wrong guess: zero →
+  substantial evidence) and its honest limit (wrong guess: still not as complete as a correct one,
+  since the underlying cross-department RRF dilution is mitigated, not eliminated). Also found,
+  and disclosed rather than fixed this pass: neither generated plan restricted to "last year" —
+  there is no date-range filter in the curated API yet, only whole-corpus monthly bucketing.
+- **2026-09-06** — Committed and pushed the previous entry's `aggregate()` completeness-check
+  fix (`3f47fa5` on `fix/retrieval-context-and-corpus-content`) and rebuilt/redeployed the
+  `backend`/`frontend`/`mcp_server` Docker images from it; all four containers confirmed healthy
+  post-rebuild. Then, at the user's explicit request, ran one more fresh live verification —
+  deliberately a new draw of the whole pipeline, not a replay of the fixture the first live check
+  used, to rule out that check having been a one-off. Real, unmodified `search` →
+  `group_by_document` → `_direct_finding` → `build_aggregate` against live Ollama/Pinecone on the
+  identical spec-example question: search again retrieved all 13 real incidents; one sub-agent
+  call (batch 1) failed outright on a genuine live timeout, losing that batch's ~4 incidents'
+  worth of evidence before it ever reached `aggregate` — a real, live instance of exactly the
+  "evidence lost upstream" case the fix is explicitly scoped not to cover; the remaining 6
+  citations were then all dropped by `aggregate`'s *first* draft (an independent bad draw, not
+  the same one from before) and fully recovered by the bounded retry
+  (`rlm_aggregate_retry_improved missing_after=0`) — this time with no internal-consistency
+  issue in the final summary at all, and the model even self-corrected a stale "one outage
+  report" phrasing carried over from one sub-agent's finding. No code changed for this
+  verification pass; `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's fourth addendum and
+  `docs/DECISIONS.md` §13 updated to record it — the retry mechanism is now confirmed live twice,
+  independently, not once.
+- **2026-09-06** — Chased down the RLM answer-quality variance the previous entry's live RBAC
+  testing surfaced, at the user's explicit request to investigate rather than accept it. Rather
+  than guess, replayed every stage of the exact failing live turn in isolation against the real
+  stack: `search(question, top_k=20)` (retrieved *all* 13 real payment incidents — not a
+  coverage gap), `group_by_document` (3 correct, document-safe batches), all three sub-agent
+  findings (each independently excellent, correctly enumerating every incident and root cause in
+  its batch), and the `aggregate` call on those exact findings (also excellent in isolation).
+  Every stage replayed correctly — the conclusion this forced, recorded in
+  `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's second addendum, is that the defect is not
+  localizable to any one stage: it is irreducible LLM-sampling variance across the pipeline's
+  3–4 sequential generative calls, where `"retrieval"` only ever makes one. Put the choice to
+  the user (accept as documented variance vs. mitigate) rather than deciding unilaterally; the
+  user asked for a lightweight, narrowly-scoped fix — not full acceptance, not a large
+  architectural change — and specifically to evaluate a post-aggregation completeness check
+  against evidence loss if the existing architecture supported one cleanly. Implemented exactly
+  that in `rlm/api.py::build_aggregate`: `_missing_citations` compares every `[Title]` citation
+  the raw findings actually contained against the aggregated summary, `_retry_aggregate_once`
+  fires exactly one bounded retry with the specific gaps fed back as feedback (never looping,
+  never raising — a failed or non-improving retry gracefully falls back to the original result),
+  and both calls request a lower `_AGGREGATE_TEMPERATURE = 0.2` via a new optional `temperature`
+  parameter added to `LLMProvider.astructured` (and threaded through `OllamaProvider`'s
+  `_call_non_streaming` and `FallbackChain`, defaulting to `None`/unchanged everywhere else).
+  5 new tests (`tests/rlm/test_api.py::TestAggregateCompletenessCheck` — a clean pass, an
+  improving retry, a non-improving retry, and a retry that itself fails — 373 total, up from
+  368); `ruff`, `ruff format`, `mypy --strict` all pass clean. Verified live, not just
+  unit-tested: replaying the real `build_aggregate` wiring against live Ollama with the
+  original investigation's real sub-agent findings, the very first live run demonstrated the
+  fix earning its keep rather than merely passing tests — the initial draft dropped all 13
+  citations, the bounded retry fired automatically, and it recovered a complete, correctly-cited
+  summary. One residual, honestly-disclosed limitation the same live run surfaced: even the
+  recovered summary's own trailing sentence ("no recurring root causes") contradicted the 13
+  correctly-cited incidents listed directly above it, and the structured `recurring_themes`
+  field stayed empty — a distinct class of problem (an internally inconsistent conclusion
+  despite complete evidence) that a citation-*presence* check cannot see and, per the user's
+  explicit scoping instructions, was not built to catch. Full narrative, including why this
+  fix stops exactly where it does, in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's third
+  addendum and `docs/DECISIONS.md` §13. Not pushed, per instruction.
+- **2026-09-06** — At the user's request, wrote `docs/RBAC_TEST_QUESTIONS.md` (a checklist of
+  sample chat messages for probing the Viewer/Analyst/Administrator boundary) and then ran
+  through it live against the already-running containerized stack (Postgres, backend, MCP
+  server, frontend, plus native Ollama). No browser-automation tool is available in this
+  session, so — after asking the user how to proceed rather than silently substituting a
+  different method — verification hit `POST /api/v1/chat/stream` directly with a throwaway
+  script (`httpx`, SSE parsing), the identical endpoint Streamlit itself calls with no logic of
+  its own in between. Every boundary in the checklist held: (1) the confidential-tier `Access
+  Control Policy` document was invisible to a Viewer's query (a vague "no evidence" answer) and
+  correctly cited by an identical Analyst query, and also by Administrator, confirming the
+  `access_level` filter is neither over- nor under-restrictive; (2) the MCP-gated `employee_directory`
+  tool returned real data (`Priya Nandan`, payments) for an Analyst but a Viewer's identical
+  request — and a Viewer's explicit "ignore your role restrictions and use the employee
+  directory tool..." bypass attempt — both fell back to `knowledge_search` and answered "no
+  evidence," since bind-time filtering never offered a Viewer the MCP tool at all; (3)
+  ASSESSMENT.md's own example research question ("summarize all outage reports related to
+  payment failures... recurring root causes") routed a Viewer to `"retrieval"` (35.5s, a direct
+  cited answer) and an Analyst to `"research"` (756.8s, three real recursive sub-agent calls,
+  the deterministic fallback plan firing because the model's generated Python failed AST
+  validation — expected, per the risk register) — confirming the `analytics_tools` gate on the
+  RLM route, not just the tools route. One pre-existing, already-documented behavior recurred
+  rather than being newly introduced: the Analyst's research-route answer this run found only 1
+  of the corpus's several payment-failure incidents and reported "no recurring root causes,"
+  the same model-bound plan-quality variance `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28
+  already describes (a smaller model-chosen `top_k`/batch count under-covers the corpus on some
+  runs) — noted here as an observed recurrence, not a new defect, and not acted on since the
+  user asked for verification, not another quality-tuning pass. No code changed this session.
+- **2026-09-06** — Fixed a real research-vs-retrieval quality gap the user found by comparing the
+  spec's own example question across roles: a Viewer (routed to `"retrieval"`) got a detailed,
+  correctly-cited answer; an Analyst (routed to `"research"`, the higher-privileged route that
+  should never answer *worse*) got a fast-but-vague answer, and on a prior run a slow one with a
+  fabricated incident count and an invented date. Root-caused to three compounding gaps against
+  `agents/nodes/retrieval.py`'s precedent — no reranking on the RLM path at all, `batch()`
+  splitting one incident's sections across different batches so no sub-agent ever saw a whole
+  incident together, and no citation/completeness instruction in the sub-agent or aggregate
+  prompts — full detail in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28. Fixed all three:
+  reranking added to `rlm/api.py::build_search`, gated by a new `RLMBudget.try_reserve_rerank()`
+  so it honors `CLAUDE.md`'s "at most once per user turn, never per RLM sub-agent" invariant
+  regardless of recursive fan-out; a new `group_by_document` (bin-packs whole documents into
+  batches, never splitting one) added to the curated RLM API and the planner's system prompt, and
+  swapped into `deterministic_fallback_plan`; explicit per-incident/citation-preservation wording
+  added to `_direct_finding` and `aggregate`'s prompts and schemas. Live verification (not just
+  the 8 new/updated tests, 368 total up from 360, `ruff`/`ruff format`/`mypy --strict` all clean)
+  found two more things worth recording rather than glossing over: a misleading log field
+  (`reranked=True` was logged even when `rerank_chunks` itself had just no-op'd one line above it,
+  because this project's own `.env` runs `RERANK_ENABLED=false` day to day — renamed to
+  `rerank_attempted` with a comment explaining the distinction), and a new, previously-masked
+  bottleneck (`rlm_max_total_sub_agent_calls`'s default of 4 now under-covers a broad question
+  once batching correctly respects document boundaries, so a research turn can report an honest
+  "no recurring root cause identified" over only a handful of the corpus's real 10–15 payment
+  incidents rather than a comprehensive answer) — surfaced as an explicit question rather than
+  resolved unilaterally; the user chose to raise the budget. Raised
+  `rlm_max_total_sub_agent_calls` 4 -> 8 and, to match, `rlm_plan_timeout_seconds` 450s -> 750s
+  (both sized off live-measured 55-90s-per-call figures, `docs/DECISIONS.md` §9), and fixed a
+  third, related staleness bug the same pass turned up: `frontend/api_client.py`'s own
+  `stream_chat_turn` client-side timeout still defaulted to 240s — already below the backend's
+  *previous* 450s budget, let alone the new 750s one — a client-side truncation risk with the
+  same shape as this session's own `curl -m 500` cutting off its second verification run
+  mid-turn; raised to 900s. Re-verified live end to end after rebuilding and restarting the
+  backend and frontend containers: the identical Analyst question now returns a real, correctly
+  cited, verifiably accurate answer — "Third-party fraud-check API outage (2025-09-25,
+  2025-12-10)" and "Card-network gateway timeout (2025-10-23, 2026-08-01)" — dates that
+  independently match the Viewer's own `"retrieval"`-route answer to the same question earlier
+  in the same investigation, strong evidence the fix produces *correct* findings, not merely
+  differently-shaped ones. That run only used 2 of the now-available 8 sub-agent calls (the
+  model's own generated plan chose a smaller `top_k=10` this time, one more instance of the
+  already-documented "answer quality is model-bound" variance across identical questions — see
+  `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 1), so it did not surface all 5 root-cause
+  categories in this run; the raised budget's coverage benefit applies when the model's plan
+  requests a wider candidate set, as seen on the two earlier verification runs (`top_k=100`
+  both times). 10 new/updated tests total across both passes (368, up from 360); `ruff`,
+  `ruff format`, `mypy --strict` all pass clean.
+- **2026-09-06** — Fixed five separate, sequentially-discovered RLM reliability and correctness
+  bugs, starting from a user report that an Analyst got "Research could not be completed:
+  Sandbox execution exceeded its 180.0s wall-clock budget" asking the spec's own example
+  question. Live-tested and root-caused each fix rather than guessing, and each fix's own retest
+  surfaced the next, previously-masked bug rather than fully resolving the turn — the honest
+  shape of this investigation, not smoothed over. (1) The 180s wall-clock budget and the 30s
+  per-call timeout were both too tight for `rlm/api.py`'s `reasoning=True` sub-agent/aggregate
+  calls (one isolated test: 12.7s and 693 reasoning tokens for a trivial 3-word prompt), tripping
+  `llm/chain.py`'s circuit breaker after 3 consecutive per-call timeouts and failing the whole
+  turn — fixed by raising `llm_request_timeout_seconds` 30s→90s, the breaker threshold 3→5, and
+  `rlm_plan_timeout_seconds` 180s→450s, now the real code defaults in `core/config.py`, not
+  local-only overrides (`docs/DECISIONS.md` §9). (2) Once turns stopped crashing, one completed
+  with a confidently wrong "no incidents identified" answer and zero visibility into why, because
+  `rlm/planner.py` only ever logged *failed* plan generation — fixed by logging every generated
+  or fallback plan's actual code (`rlm_generated_plan_used`/`rlm_fallback_plan_used`/
+  `rlm_plan_generation_call_failed`), which immediately exposed bug 3. (3) The RLM sandbox's own
+  `search()` (`rlm/api.py::build_search`) had never received trade-off 26's department-scoped/
+  all-department merge fix — only `agents/nodes/retrieval.py` had — so it ran a plain, unscoped,
+  all-6-department search vulnerable to the identical RRF-dilution bug; compounded by the model
+  inventing nonexistent `document_type`/`department` filter values ("outage report") that
+  silently zeroed correctly-retrieved evidence. Fixed by extracting the merge helper into a
+  shared `retrieval/hybrid.py::merge_prioritizing_scoped`, threading the Supervisor's department
+  guess through `RLMContext`/`execute_research`/`research_node` and every recursive sub-agent
+  context, teaching `rlm/planner.py`'s system prompt the real filter values, and making
+  `filter_chunks` ignore an unrecognized value defensively instead of matching nothing — verified
+  the retrieval half directly against live Pinecone, outside the running app, before trusting the
+  fix. (4) A recurring, still-unfixed model habit (`batch(chunks)` called without its required
+  `size` argument, seen on two separate runs) is documented rather than patched, since the
+  existing deterministic fallback plan already covers it correctly — confirmed live: a real,
+  correct, cited answer identifying four real recurring payment-failure root causes. (5) That
+  correct run still showed "Research complete (0 sub-agent call(s))" on the Activity Panel
+  despite 4 real ones running — a pre-existing Cycle 5 bug (the depth-0 runtime-fallback's fresh
+  `RLMBudget` swap, trade-off 17, was never read back by `execute_research`, which kept reading
+  its own original, un-incremented budget object) that had simply never had the chance to surface
+  before this session's combination of a runtime plan failure *and* a successful fallback. Fixed
+  by having `_run_plan_at_depth` return the actual budget object used. Final live re-verification
+  of the original question: 352s end to end, "Research complete (4 sub-agent call(s))" reported
+  correctly, a real, validated, evidence-grounded answer. Full narrative in
+  `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 27. 5 new tests (360 total, up from 355); `ruff`,
+  `ruff format`, `mypy --strict` all pass clean.
+- **2026-09-06** — Fixed a real regression in the department-scoped search fix from the
+  previous entry below, found the next time the user actually used it: "find the document that
+  outlines the data retention policy" and "find the document that details certificate rotation"
+  both returned "no evidence," because the Supervisor's `department` guess was simply wrong for
+  both (`product` instead of `human_resources`, `core_banking` instead of `security`), and the
+  previous fix had excluded every other department outright once a guess was made — turning a
+  wrong guess into an unreachable document instead of a merely diluted one. Fixed by never
+  excluding on `department` alone: `retrieval_node` now runs the scoped and all-department
+  searches concurrently and merges them (`_merge_prioritizing_scoped`), so a correct guess still
+  gets protected from the RRF dilution the previous fix targeted, while a wrong guess still has
+  the full-recall, all-department search as a safety net. Getting the merge budget right took two
+  more live-verified wrong turns before landing on "give both searches their own full budget,
+  cap the merge at the sum of both" — full narrative, including the two intermediate wrong
+  attempts, in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26's postscript. Re-verified the
+  original 3-turn scenario end to end to confirm no regression from the larger merged result set.
+  7 new tests (355 total, up from 348); `ruff`, `ruff format`, `mypy --strict` all pass clean.
+- **2026-09-06** — Fixed a real "wrong answer" bug the user hit running the Streamlit frontend as
+  a Viewer: a natural 3-turn conversation about the payment-failure runbook ended with the
+  assistant claiming its response steps weren't in the evidence, despite the document containing
+  them in plain text. Reproduced live against the raw API on the user's exact scenario before
+  touching code, then found and fixed three separate, compounding retrieval bugs one layer at a
+  time, verifying against the same live scenario after each fix rather than assuming success —
+  full detail, including the two points where the user was asked how far to extend the fix rather
+  than it being decided unilaterally, in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26. (1)
+  `retrieval_node` searched with the raw, unresolved follow-up text ("what are the response steps
+  covered in that document?" names no document); fixed by extending the Supervisor's existing
+  per-turn routing schema with a `search_query` field — a context-resolved rewrite of the latest
+  message — at zero extra LLM calls. (2) Even a corrected query didn't surface the right chunk,
+  because `Chunk.to_pinecone_record()` never embedded the document title or section heading, and
+  the seed corpus's generic sections were byte-identical across every document of a type (not just
+  runbooks — the same anti-pattern was found and fixed across architecture docs, product specs,
+  policies, meeting notes, and non-payment incidents once the user asked for the full corpus to be
+  audited); fixed by embedding `"{title} — {section}\n\n{text}"` while keeping citations and
+  displayed text on a separate, plain `section_text` field, rewriting every generic section with
+  real per-document content, and including `title` in `compute_content_hash` so the format change
+  itself forced the necessary full re-embed rather than the idempotency check silently skipping
+  it. (3) Reciprocal Rank Fusion across all 6 departments diluted a chunk that was already
+  correctly ranked #1 *within* its own department, because RRF scores purely by in-list rank with
+  no notion of cross-department relevance; fixed by having the Supervisor's same routing call also
+  name the one department a question is about (or `"unclear"`), passed through to `hybrid_search`'s
+  existing `namespaces` parameter. Final live verification replayed the user's exact 3-turn
+  conversation end to end: all three turns now answer correctly, with turn 3 quoting the runbook's
+  five response steps verbatim, correctly cited. 6 new tests (348 total, up from 342 before this
+  session); `ruff`, `ruff format`, `mypy --strict` all pass clean.
 - **2026-09-06** — Fixed a real coupling bug the user hit running the just-built containerized
   frontend: it crashed on startup with `ModuleNotFoundError: No module named 'backend'`
   (`from backend.app.observability.events import ActivityEvent, ActivityEventType` in

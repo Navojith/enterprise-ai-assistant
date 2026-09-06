@@ -12,13 +12,14 @@ import contextvars
 import dataclasses
 from collections.abc import AsyncIterator, Sequence
 from datetime import date
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import BaseMessage, BaseMessageChunk
 from pydantic import BaseModel
 
+from backend.app.core.config import Settings
 from backend.app.core.errors import LLMTimeoutError, VectorStoreUnavailableError
 from backend.app.core.security.rbac import Principal, Role
 from backend.app.llm.provider import SchemaT
@@ -34,7 +35,9 @@ from backend.app.rlm.api import (
     build_search,
     build_sub_agent,
     build_sub_agents,
+    count_by_month,
     filter_chunks,
+    group_by_document,
 )
 from backend.app.rlm.sandbox import run_sandboxed
 
@@ -62,17 +65,35 @@ class _FakeLLM:
     `LLMProvider` Protocol) — trimmed only in that a single result list serves every call."""
 
     def __init__(
-        self, *, results: list[BaseModel] | None = None, error: Exception | None = None
+        self,
+        *,
+        results: list[BaseModel] | None = None,
+        error: Exception | None = None,
+        fail_on_call: int | None = None,
     ) -> None:
         self._results = list(results or [])
         self._error = error
+        # `fail_on_call` (1-indexed) raises `error` only on that specific call, falling through
+        # to `_results` on every other call — needed to test a retry's *own* call failing
+        # without also breaking every existing test that passes `error=` alone expecting it to
+        # fail unconditionally (the default, `fail_on_call=None`, preserves that exact behavior).
+        self._fail_on_call = fail_on_call
         self.calls = 0
+        # Recorded per call so a test can assert *what* was requested, not just how many times —
+        # e.g. that `build_aggregate` actually asked for a lower, more deterministic temperature.
+        self.temperatures_requested: list[float | None] = []
 
     async def astructured(
-        self, messages: Sequence[BaseMessage], *, schema: type[SchemaT], reasoning: bool = False
+        self,
+        messages: Sequence[BaseMessage],
+        *,
+        schema: type[SchemaT],
+        reasoning: bool = False,
+        temperature: float | None = None,
     ) -> SchemaT:
         self.calls += 1
-        if self._error is not None:
+        self.temperatures_requested.append(temperature)
+        if self._error is not None and self._fail_on_call in (None, self.calls):
             raise self._error
         result = self._results[min(self.calls, len(self._results)) - 1]
         assert isinstance(result, schema)
@@ -93,6 +114,8 @@ def _context(
     max_concurrent_sub_agents: int = 4,
     depth: int = 0,
     run_nested_plan: Any = None,
+    department: str | None = None,
+    settings: Settings | None = None,
 ) -> RLMContext:
     async def _default_nested(*, question: str, data: Any, context: RLMContext) -> str:
         raise NotImplementedError("this test does not expect nested-plan recursion")
@@ -104,10 +127,15 @@ def _context(
         role="analyst",
         store=AsyncMock(),  # non-None so `search` doesn't short-circuit; `hybrid_search` is faked
         llm=llm or _FakeLLM(),
+        # Reranking disabled by default so `search`-exercising tests never touch Postgres for
+        # the monthly-usage counter — `TestSearchReranking` below turns it on explicitly against
+        # a faked `rerank_chunks` instead of a real one.
+        settings=settings or Settings(_env_file=None, rerank_enabled=False),
         budget=RLMBudget(max_depth=max_depth, max_total_sub_agent_calls=max_total_sub_agent_calls),
         depth=depth,
         max_concurrent_sub_agents=max_concurrent_sub_agents,
         run_nested_plan=run_nested_plan or _default_nested,
+        department=department,
     )
 
 
@@ -166,6 +194,27 @@ class TestFilterChunks:
 
         assert [c["chunk_id"] for c in result] == ["a"]
 
+    def test_an_unrecognized_document_type_is_ignored_rather_than_matching_nothing(self) -> None:
+        """The exact live-verified failure: a generated plan filtered on `document_type="outage
+        report"` — not a real value — and got an empty result with no error anywhere to explain
+        why. An invented value must degrade to "no filter", never to "everything excluded"."""
+        chunks = [_chunk(chunk_id="a", document_type="incident")]
+
+        result = filter_chunks(
+            [c.model_dump(mode="json") for c in chunks], document_type="outage report"
+        )
+
+        assert [c["chunk_id"] for c in result] == ["a"]
+
+    def test_an_unrecognized_department_is_ignored_rather_than_matching_nothing(self) -> None:
+        chunks = [_chunk(chunk_id="a", department="payments")]
+
+        result = filter_chunks(
+            [c.model_dump(mode="json") for c in chunks], department="not-a-real-department"
+        )
+
+        assert [c["chunk_id"] for c in result] == ["a"]
+
 
 class TestBatchChunks:
     def test_splits_into_fixed_size_groups(self) -> None:
@@ -185,6 +234,109 @@ class TestBatchChunks:
         assert batch_chunks([], 5) == []
 
 
+class TestGroupByDocument:
+    def test_never_splits_one_document_across_two_batches(self) -> None:
+        """The exact live-verified bug `batch()` caused: a document's sections (e.g. an
+        incident's Root Cause and Summary) landing in different batches, so no sub-agent ever
+        sees the whole document together. A small `max_batch_size` forces multiple batches;
+        each document's chunks must all land in exactly one of them."""
+        chunks = [
+            {"document_id": "doc-a", "section": "Summary"},
+            {"document_id": "doc-b", "section": "Summary"},
+            {"document_id": "doc-a", "section": "Root Cause"},
+            {"document_id": "doc-b", "section": "Root Cause"},
+        ]
+
+        batches = group_by_document(chunks, max_batch_size=1)
+
+        assert len(batches) == 2
+        for document_id in ("doc-a", "doc-b"):
+            containing = [
+                batch for batch in batches if any(c["document_id"] == document_id for c in batch)
+            ]
+            assert len(containing) == 1
+            assert all(c["document_id"] == document_id for c in containing[0])
+
+    def test_packs_multiple_small_documents_into_one_batch_up_to_the_size_cap(self) -> None:
+        chunks = [
+            {"document_id": "doc-a", "section": "s1"},
+            {"document_id": "doc-a", "section": "s2"},
+            {"document_id": "doc-b", "section": "s1"},
+            {"document_id": "doc-b", "section": "s2"},
+        ]
+
+        batches = group_by_document(chunks, max_batch_size=4)
+
+        assert batches == [chunks]
+
+    def test_a_document_larger_than_the_cap_still_gets_its_own_batch(self) -> None:
+        chunks = [{"document_id": "doc-a", "section": str(i)} for i in range(5)]
+
+        batches = group_by_document(chunks, max_batch_size=2)
+
+        assert batches == [chunks]
+
+    def test_preserves_first_appearance_order(self) -> None:
+        chunks = [
+            {"document_id": "doc-b", "section": "s"},
+            {"document_id": "doc-a", "section": "s"},
+        ]
+
+        batches = group_by_document(chunks, max_batch_size=1)
+
+        assert [batch[0]["document_id"] for batch in batches] == ["doc-b", "doc-a"]
+
+    def test_empty_input_produces_no_batches(self) -> None:
+        assert group_by_document([]) == []
+
+
+class TestCountByMonth:
+    def test_counts_distinct_documents_per_month(self) -> None:
+        chunks = [
+            {"document_id": "inc-1", "created_date": "2025-09-05"},
+            {
+                "document_id": "inc-1",
+                "created_date": "2025-09-05",
+            },  # same incident, another section
+            {"document_id": "inc-2", "created_date": "2025-09-20"},
+            {"document_id": "inc-3", "created_date": "2025-10-01"},
+        ]
+
+        assert count_by_month(chunks) == {"2025-09": 2, "2025-10": 1}
+
+    def test_does_not_over_count_a_single_documents_repeated_sections(self) -> None:
+        """One incident is chunked into several sections (Summary, Root Cause, Timeline, ...),
+        each carrying the same `created_date` — counting chunks directly would over-count every
+        incident by its section count."""
+        chunks = [
+            {"document_id": "inc-1", "created_date": "2025-09-05"}
+            for _ in range(4)  # 4 sections of the same incident
+        ]
+
+        assert count_by_month(chunks) == {"2025-09": 1}
+
+    def test_result_is_sorted_chronologically(self) -> None:
+        chunks = [
+            {"document_id": "inc-3", "created_date": "2026-01-01"},
+            {"document_id": "inc-1", "created_date": "2025-09-05"},
+            {"document_id": "inc-2", "created_date": "2025-12-01"},
+        ]
+
+        assert list(count_by_month(chunks).keys()) == ["2025-09", "2025-12", "2026-01"]
+
+    def test_a_chunk_with_no_created_date_is_skipped_rather_than_corrupting_a_bucket(self) -> None:
+        chunks = [
+            {"document_id": "inc-1", "created_date": "2025-09-05"},
+            {"document_id": "inc-2", "created_date": ""},
+            {"document_id": "inc-3"},
+        ]
+
+        assert count_by_month(chunks) == {"2025-09": 1}
+
+    def test_empty_input_produces_an_empty_result(self) -> None:
+        assert count_by_month([]) == {}
+
+
 class TestRLMBudget:
     def test_reserves_up_to_the_limit_then_refuses(self) -> None:
         budget = RLMBudget(max_depth=2, max_total_sub_agent_calls=2)
@@ -193,6 +345,15 @@ class TestRLMBudget:
         assert budget.try_reserve_sub_agent_call() is True
         assert budget.try_reserve_sub_agent_call() is False
         assert budget.sub_agent_calls_made == 2
+
+    def test_reserves_the_rerank_call_exactly_once(self) -> None:
+        """CLAUDE.md's architecture invariant: reranking runs at most once per user turn,
+        never per RLM sub-agent."""
+        budget = RLMBudget(max_depth=2, max_total_sub_agent_calls=2)
+
+        assert budget.try_reserve_rerank() is True
+        assert budget.try_reserve_rerank() is False
+        assert budget.try_reserve_rerank() is False
 
 
 class TestSyncAsyncBridge:
@@ -242,6 +403,177 @@ class TestSyncAsyncBridge:
         result = await asyncio.get_running_loop().run_in_executor(None, search, "q")
 
         assert result == []
+
+    async def test_search_with_a_department_merges_a_scoped_and_unscoped_search(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26: a plain all-department search lets
+        RRF fusion bury the right department's chunks under irrelevant ones. With a department
+        set, `search` must run *both* a scoped and an all-department search and keep every
+        scoped hit, exactly like `agents/nodes/retrieval.py`'s own merge."""
+        scoped_chunk = _chunk("scoped::hit")
+        unscoped_chunk = _chunk("unscoped::hit", department="security")
+        calls: list[dict[str, Any]] = []
+
+        async def _fake_hybrid_search(
+            store: object,
+            *,
+            query_text: str,
+            role: str,
+            top_k: int,
+            namespaces: list[str] | None = None,
+        ) -> list[RetrievedChunk]:
+            calls.append({"namespaces": namespaces, "top_k": top_k})
+            return [scoped_chunk] if namespaces else [unscoped_chunk]
+
+        monkeypatch.setattr(api, "hybrid_search", _fake_hybrid_search)
+        context = _context(department="payments")
+
+        outcome = await run_sandboxed(
+            "result = search('payment outages', top_k=5)",
+            injected_globals=build_rlm_globals(context),
+            timeout_seconds=2.0,
+        )
+
+        assert {c["chunk_id"] for c in outcome.result} == {"scoped::hit", "unscoped::hit"}
+        scoped_calls = [c for c in calls if c["namespaces"]]
+        assert scoped_calls and all(c["namespaces"] == ["payments"] for c in scoped_calls)
+        assert any(c["namespaces"] is None for c in calls)  # the all-department search too
+
+    async def test_a_full_scoped_list_no_longer_crowds_out_every_unscoped_hit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 29, the exact live-verified regression:
+        `hybrid_search` never returns "no good match" for a namespace, only its nearest
+        neighbors — so a *wrong* department guess still fills all `top_k` scoped slots with
+        irrelevant chunks. Before this fix, `merge_prioritizing_scoped(scoped, unscoped,
+        top_k=top_k)` kept every one of those `top_k` (irrelevant) scoped hits unconditionally,
+        leaving zero merge budget for the (correct, but different-department) unscoped result —
+        strictly worse than running no department-scoping at all. The merge budget is now
+        `top_k * 2` (matching `agents/nodes/retrieval.py`'s already-proven `_MERGED_TOP_K`), so a
+        fully-padded, wrong-department scoped list can no longer displace unscoped hits."""
+        requested_top_k = 5
+        scoped_chunks = [
+            _chunk(f"scoped::{i}", department="product") for i in range(requested_top_k)
+        ]
+        unscoped_chunks = [
+            _chunk(f"unscoped::{i}", department="payments") for i in range(requested_top_k)
+        ]
+
+        async def _fake_hybrid_search(
+            store: object,
+            *,
+            query_text: str,
+            role: str,
+            top_k: int,
+            namespaces: list[str] | None = None,
+        ) -> list[RetrievedChunk]:
+            return list(scoped_chunks) if namespaces else list(unscoped_chunks)
+
+        monkeypatch.setattr(api, "hybrid_search", _fake_hybrid_search)
+        context = _context(department="product")
+
+        outcome = await run_sandboxed(
+            f"result = search('payment incidents per month last year', top_k={requested_top_k})",
+            injected_globals=build_rlm_globals(context),
+            timeout_seconds=2.0,
+        )
+
+        result_ids = {c["chunk_id"] for c in outcome.result}
+        assert result_ids == {c.chunk_id for c in [*scoped_chunks, *unscoped_chunks]}
+        # Every genuinely relevant (unscoped) hit survived, not just the wrong-department ones.
+        assert all(f"unscoped::{i}" in result_ids for i in range(requested_top_k))
+
+    async def test_search_without_a_department_never_scopes_by_namespace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No department identified — behavior must stay exactly the pre-fix plain search, one
+        call, no `namespaces` kwarg at all."""
+        calls: list[dict[str, Any]] = []
+
+        async def _fake_hybrid_search(
+            store: object, *, query_text: str, role: str, top_k: int
+        ) -> list[RetrievedChunk]:
+            calls.append({"top_k": top_k})
+            return [_chunk()]
+
+        monkeypatch.setattr(api, "hybrid_search", _fake_hybrid_search)
+        context = _context(department=None)
+
+        await run_sandboxed(
+            "result = search('q', top_k=5)",
+            injected_globals=build_rlm_globals(context),
+            timeout_seconds=2.0,
+        )
+
+        assert len(calls) == 1
+
+    async def test_search_reranks_once_when_the_budget_allows_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Parity fix: before this, `search` never reranked at all, unlike
+        `agents/nodes/retrieval.py`. Gated through `RLMBudget.try_reserve_rerank` — the once-
+        per-turn invariant CLAUDE.md names explicitly."""
+        rerank_calls: list[str] = []
+
+        async def _fake_hybrid_search(
+            store: object, *, query_text: str, role: str, top_k: int
+        ) -> list[RetrievedChunk]:
+            return [_chunk("a"), _chunk("b")]
+
+        async def _fake_rerank_chunks(
+            store: object, *, query: str, chunks: list[RetrievedChunk], settings: object
+        ) -> list[RetrievedChunk]:
+            rerank_calls.append(query)
+            return list(reversed(chunks))
+
+        monkeypatch.setattr(api, "hybrid_search", _fake_hybrid_search)
+        monkeypatch.setattr(api, "rerank_chunks", _fake_rerank_chunks)
+        context = _context(settings=Settings(_env_file=None, rerank_enabled=True))
+
+        outcome = await run_sandboxed(
+            "result = search('payment outages', top_k=5)",
+            injected_globals=build_rlm_globals(context),
+            timeout_seconds=2.0,
+        )
+
+        assert rerank_calls == ["payment outages"]
+        assert [c["chunk_id"] for c in outcome.result] == [
+            "b",
+            "a",
+        ]  # reversed by the fake reranker
+        assert context.budget.reranked is True
+
+    async def test_search_never_reranks_twice_in_the_same_turn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A second `search()` call sharing the same `RLMBudget` — e.g. a nested sub-agent's own
+        search, or a generated plan calling `search` more than once — must not spend a second
+        rerank call. The second call's chunks come back in raw (unreversed) RRF order."""
+        rerank_calls = 0
+
+        async def _fake_hybrid_search(
+            store: object, *, query_text: str, role: str, top_k: int
+        ) -> list[RetrievedChunk]:
+            return [_chunk("a")]
+
+        async def _fake_rerank_chunks(
+            store: object, *, query: str, chunks: list[RetrievedChunk], settings: object
+        ) -> list[RetrievedChunk]:
+            nonlocal rerank_calls
+            rerank_calls += 1
+            return chunks
+
+        monkeypatch.setattr(api, "hybrid_search", _fake_hybrid_search)
+        monkeypatch.setattr(api, "rerank_chunks", _fake_rerank_chunks)
+        context = _context(settings=Settings(_env_file=None, rerank_enabled=True))
+        search = build_search(context)
+        loop = asyncio.get_running_loop()
+
+        await loop.run_in_executor(None, search, "first")
+        await loop.run_in_executor(None, search, "second")
+
+        assert rerank_calls == 1
 
     async def test_sub_agent_bottoms_out_to_a_leaf_finding_at_max_depth(self) -> None:
         llm = _FakeLLM(
@@ -336,6 +668,124 @@ class TestSyncAsyncBridge:
         )
 
         assert outcome.result == {"summary": "f1 f2", "recurring_themes": []}
+
+    async def test_aggregate_requests_a_lower_temperature_than_the_provider_default(self) -> None:
+        """`aggregate` should synthesize the evidence it is handed, not explore alternative
+        phrasings of it (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's second addendum) —
+        verifies the wiring actually asks for that, not just that the feature exists somewhere."""
+        llm = _FakeLLM(results=[AggregatedFindings(summary="[A] cause one", recurring_themes=[])])
+        context = _context(llm=llm)
+
+        await run_sandboxed(
+            "result = aggregate(data, 'q')",
+            injected_globals={**build_rlm_globals(context), "data": ["[A] cause one"]},
+            timeout_seconds=2.0,
+        )
+
+        assert llm.temperatures_requested == [api._AGGREGATE_TEMPERATURE]
+
+
+class TestAggregateCompletenessCheck:
+    """`build_aggregate`'s post-aggregation completeness guard: does the synthesized `summary`
+    still mention every `[Title]` citation the raw sub-agent findings actually contained? This
+    is deliberately narrower than a correctness check — it can only catch evidence a sub-agent
+    *returned* that aggregation then dropped, never evidence the search/planning stages failed
+    to retrieve in the first place (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's second
+    addendum names this distinction explicitly)."""
+
+    _FINDINGS: ClassVar[list[str]] = ["[Incident A] root cause X", "[Incident B] root cause Y"]
+
+    async def test_no_retry_when_the_summary_already_preserves_every_citation(self) -> None:
+        llm = _FakeLLM(
+            results=[
+                AggregatedFindings(
+                    summary="[Incident A]: cause X. [Incident B]: cause Y.",
+                    recurring_themes=[],
+                )
+            ]
+        )
+        context = _context(llm=llm)
+
+        outcome = await run_sandboxed(
+            "result = aggregate(data, 'q')",
+            injected_globals={**build_rlm_globals(context), "data": self._FINDINGS},
+            timeout_seconds=2.0,
+        )
+
+        assert llm.calls == 1
+        assert outcome.result["summary"] == "[Incident A]: cause X. [Incident B]: cause Y."
+
+    async def test_retries_once_and_uses_the_improved_result_when_a_citation_is_dropped(
+        self,
+    ) -> None:
+        llm = _FakeLLM(
+            results=[
+                AggregatedFindings(summary="[Incident A]: cause X.", recurring_themes=[]),
+                AggregatedFindings(
+                    summary="[Incident A]: cause X. [Incident B]: cause Y.",
+                    recurring_themes=["cause X"],
+                ),
+            ]
+        )
+        context = _context(llm=llm)
+
+        outcome = await run_sandboxed(
+            "result = aggregate(data, 'q')",
+            injected_globals={**build_rlm_globals(context), "data": self._FINDINGS},
+            timeout_seconds=2.0,
+        )
+
+        assert llm.calls == 2
+        assert outcome.result == {
+            "summary": "[Incident A]: cause X. [Incident B]: cause Y.",
+            "recurring_themes": ["cause X"],
+        }
+        # The retry still asked for the same low, deterministic temperature, not the provider
+        # default.
+        assert llm.temperatures_requested == [api._AGGREGATE_TEMPERATURE] * 2
+
+    async def test_retry_that_does_not_improve_falls_back_to_the_original_result(self) -> None:
+        """Bounded: a retry that is no more complete than the first attempt must not be
+        preferred over it, and must not trigger a second retry — exactly 2 calls, never more."""
+        llm = _FakeLLM(
+            results=[
+                AggregatedFindings(summary="[Incident A]: cause X.", recurring_themes=[]),
+                AggregatedFindings(
+                    summary="[Incident A]: cause X, still incomplete.", recurring_themes=[]
+                ),
+            ]
+        )
+        context = _context(llm=llm)
+
+        outcome = await run_sandboxed(
+            "result = aggregate(data, 'q')",
+            injected_globals={**build_rlm_globals(context), "data": self._FINDINGS},
+            timeout_seconds=2.0,
+        )
+
+        assert llm.calls == 2
+        assert outcome.result == {"summary": "[Incident A]: cause X.", "recurring_themes": []}
+
+    async def test_retry_call_failure_gracefully_falls_back_to_the_original_result(self) -> None:
+        """The retry attempt itself can fail (timeout, model unavailable) without losing the
+        first attempt's already-validated, if incomplete, result — matches every other
+        degradation in this codebase (a bad situation gets worse gracefully, never a hard
+        failure this deep in a research turn)."""
+        llm = _FakeLLM(
+            results=[AggregatedFindings(summary="[Incident A]: cause X.", recurring_themes=[])],
+            error=LLMTimeoutError("timed out"),
+            fail_on_call=2,
+        )
+        context = _context(llm=llm)
+
+        outcome = await run_sandboxed(
+            "result = aggregate(data, 'q')",
+            injected_globals={**build_rlm_globals(context), "data": self._FINDINGS},
+            timeout_seconds=2.0,
+        )
+
+        assert llm.calls == 2
+        assert outcome.result == {"summary": "[Incident A]: cause X.", "recurring_themes": []}
 
 
 class TestBuildSubAgentAndSubAgentsDirectly:

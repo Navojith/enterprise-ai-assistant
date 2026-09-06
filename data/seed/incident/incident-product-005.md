@@ -14,8 +14,8 @@ On 2026-07-17, the product team responded to an incident involving mobile app cr
 
 ## Impact
 
-Impact was contained to internal operations and a subset of customer-facing functionality for the duration of the incident.
+A subset of mobile app users on the affected app version experienced a crash loop on startup after receiving the configuration update, temporarily preventing them from accessing the app.
 
 ## Resolution
 
-The team applied the relevant runbook, restored normal operation, and scheduled a follow-up review to assess whether additional safeguards were warranted.
+The team identified the malformed configuration flag and rolled it back through the remote configuration service, confirming the crash-free session rate recovered to baseline within 15 minutes. No app store release was required since the configuration was server-controlled.

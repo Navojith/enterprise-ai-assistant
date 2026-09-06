@@ -106,13 +106,16 @@ class OllamaProvider:
         *,
         schema: type[SchemaT],
         reasoning: bool = False,
+        temperature: float | None = None,
     ) -> SchemaT:
         message_list = list(messages)
         last_error: Exception | None = None
         for attempt in range(1, _STRUCTURED_OUTPUT_ATTEMPTS + 1):
             try:
                 raw_content = await asyncio.wait_for(
-                    self._call_non_streaming(message_list, schema=schema, reasoning=reasoning),
+                    self._call_non_streaming(
+                        message_list, schema=schema, reasoning=reasoning, temperature=temperature
+                    ),
                     timeout=self._request_timeout,
                 )
             except TimeoutError as exc:
@@ -163,7 +166,12 @@ class OllamaProvider:
         ) from last_error
 
     async def _call_non_streaming(
-        self, messages: list[BaseMessage], *, schema: type[SchemaT], reasoning: bool
+        self,
+        messages: list[BaseMessage],
+        *,
+        schema: type[SchemaT],
+        reasoning: bool,
+        temperature: float | None = None,
     ) -> str:
         """One non-streaming `/api/chat` call, returning the raw (unparsed, unvalidated) content
         string — `astructured()` owns parsing, validation, retry, and the timeout wrapper so this
@@ -175,13 +183,23 @@ class OllamaProvider:
         """
         # `_chat_params` is `ChatOllama`'s own request-shape builder (message conversion, model
         # name, `num_gpu`, `keep_alive`, ...) — reused rather than reimplemented so this path can
-        # never quietly drift from `astream()`'s GPU/timeout/model settings.
+        # never quietly drift from `astream()`'s GPU/timeout/model settings. Passing `options`
+        # explicitly (only when a caller asked for a non-default `temperature`) replaces
+        # `_chat_params`'s own instance-attribute-derived dict wholesale rather than merging into
+        # it, so `num_gpu` is repeated here to avoid silently losing trade-off 13's forced full
+        # GPU residency the moment a caller wants a non-default temperature.
+        options_override = (
+            {"num_gpu": _FORCE_FULL_GPU_OFFLOAD, "temperature": temperature}
+            if temperature is not None
+            else None
+        )
         chat_params = self._model._chat_params(
             messages,
             stop=None,
             stream=False,
             reasoning=reasoning,
             format=schema.model_json_schema(),
+            **({"options": options_override} if options_override is not None else {}),
         )
 
         config = ensure_config()

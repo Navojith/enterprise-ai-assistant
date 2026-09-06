@@ -14,16 +14,16 @@ This runbook defines the standard operating procedure for the security on-call t
 
 ## Detection
 
-This condition is typically surfaced by an automated alert tied to an elevated error rate, latency, or queue-depth threshold specific to the affected system.
+The fraud detection service alerts when failed-login attempts from a concentrated set of IP ranges exceed the baseline rate, visible on the Login Anomaly dashboard.
 
 ## Response Steps
 
-1. Acknowledge the alert and confirm the affected system.
-2. Check the system's current health dashboard for corroborating signals before taking action.
-3. Apply the documented mitigation for this failure mode.
-4. Confirm recovery against the same signal that triggered the alert.
-5. Open a follow-up ticket for any remediation that could not be completed during the incident.
+1. Confirm the pattern is credential stuffing rather than a genuine traffic spike by checking the login endpoint's failure-to-success ratio and IP concentration.
+2. Enable the elevated rate-limiting and CAPTCHA challenge profile on the login endpoint.
+3. Block the confirmed malicious IP ranges at the edge/WAF layer.
+4. Force a password reset for any account with a successful login from a flagged IP range.
+5. Confirm the failed-login rate returns to baseline before standing down.
 
 ## Escalation
 
-If the mitigation does not restore normal operation within the runbook's expected recovery window, escalate to the platform engineering on-call rotation.
+If any customer account is confirmed compromised, escalate to the fraud team and follow the incident disclosure policy for a potential customer data event.

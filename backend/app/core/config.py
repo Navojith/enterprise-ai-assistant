@@ -61,11 +61,22 @@ class Settings(BaseSettings):
     # tokens in a stream before it's treated as stalled — not the total stream duration, since a
     # legitimate answer plus qwen3's thinking preamble can run well past either number in total.
     # See docs/ASSUMPTIONS_AND_TRADEOFFS.md trade-off 13 for the throughput this budget assumes.
-    llm_request_timeout_seconds: float = Field(default=30.0, gt=0)
+    # 90s, not 30s: live testing found `rlm/api.py`'s sub-agent/aggregate calls — which run with
+    # `reasoning=True`, unlike the Supervisor's routing calls — routinely need well over 30s on
+    # this hardware even for a short prompt (one measured run: 12.7s and 693 tokens of chain-of-
+    # thought for a trivial 3-word request), and 3 consecutive timeouts at the old 30s tripped
+    # the circuit breaker below, failing the *entire* turn including the unrelated Response node,
+    # not just the slow research turn that caused it (docs/ASSUMPTIONS_AND_TRADEOFFS.md
+    # trade-off 27).
+    llm_request_timeout_seconds: float = Field(default=90.0, gt=0)
     llm_stream_stall_timeout_seconds: float = Field(default=30.0, gt=0)
     # Fallback-chain circuit breaker (llm/chain.py): consecutive failures before a provider is
     # skipped, and how long it stays skipped before one trial request is allowed through again.
-    llm_circuit_breaker_failure_threshold: int = Field(default=3, gt=0)
+    # Threshold raised 3 -> 5 alongside the timeout increase above, for the same reason: a
+    # research turn's several sequential reasoning-heavy calls should have a little more room for
+    # one or two of them running long before the whole turn is abandoned, without disabling the
+    # breaker's real purpose (a genuinely unreachable Ollama still opens it well within a turn).
+    llm_circuit_breaker_failure_threshold: int = Field(default=5, gt=0)
     llm_circuit_breaker_cooldown_seconds: float = Field(default=30.0, gt=0)
 
     # --- Agent graph (Cycle 3) ---
@@ -170,7 +181,22 @@ class Settings(BaseSettings):
     # sake — `docs/DECISIONS.md` §3's "60-90s per question" budget assumed the RLM path would
     # look like the rest of the graph (a handful of fast schema-constrained calls), which does
     # not hold once a research turn genuinely fans out to multiple sequential sub-agent analyses.
-    rlm_plan_timeout_seconds: float = Field(default=180.0, gt=0)
+    # Raised again, 180s -> 450s, alongside `llm_request_timeout_seconds` above
+    # (docs/ASSUMPTIONS_AND_TRADEOFFS.md trade-off 27): once individual calls were given more
+    # room to actually succeed instead of timing out at 30s, the same sequential chain's *total*
+    # wall-clock cost grew with it — a real completed run was measured at ~350s end to end
+    # (a validated plan-generation failure, a fallback plan's own search, and 4 real sequential
+    # sub-agent analyses each running full reasoning), and needs headroom above that, not exactly
+    # up to it.
+    # Raised a third time, 450s -> 750s, alongside `rlm_max_total_sub_agent_calls` below
+    # (docs/ASSUMPTIONS_AND_TRADEOFFS.md trade-off 28): once `rlm/api.py::group_by_document`
+    # made batching correctly respect document boundaries, covering a broad question's real
+    # evidence needs more sequential sub-agent calls than 4 comfortably fits inside 450s — live
+    # verification measured individual reasoning-enabled sub-agent/aggregate calls at 55-90s each
+    # on this hardware. 750s gives 8 sequential sub-agent calls plus plan generation, search, and
+    # aggregation genuine headroom rather than cutting a real run off mid-way, the same reasoning
+    # as the 180s -> 450s raise above, just for a larger budget.
+    rlm_plan_timeout_seconds: float = Field(default=750.0, gt=0)
     # How many levels of *plan generation* `sub_agent` may recurse through before bottoming out
     # to one direct, non-recursive LLM analysis — see `rlm/api.py`'s module docstring. Defaults
     # to 1 (a top-level plan's `sub_agent` calls always bottom out to a single leaf analysis,
@@ -197,7 +223,19 @@ class Settings(BaseSettings):
     # `rlm.api.RLMBudget` — bounds *width*, which `rlm_max_depth` alone does not, keeping a
     # research turn's total LLM calls inside docs/DECISIONS.md §3's per-question latency budget
     # regardless of how the generated plan's tree happens to be shaped.
-    rlm_max_total_sub_agent_calls: int = Field(default=4, ge=1)
+    #
+    # Raised 4 -> 8 (docs/ASSUMPTIONS_AND_TRADEOFFS.md trade-off 28): 4 was tuned against a
+    # fixed-size `batch()` that (before that trade-off's fix) happened to spread thin across many
+    # incidents inaccurately — one incident's sections split across different batches. Once
+    # `rlm/api.py::group_by_document` made batching correctly respect document boundaries, 4
+    # calls covers only a handful of whole documents, well under the seed corpus's real ~10-15
+    # payment incidents for the spec's own example question — live-verified producing an honest
+    # but thin "no recurring root cause identified" over a handful of documents instead of a
+    # comprehensive answer. 8 comfortably covers that corpus's real incident count at
+    # `group_by_document`'s default `max_batch_size=8` (roughly 2 incidents per batch), at the
+    # cost of up to twice as many sequential local-model calls per research turn — paid for by
+    # `rlm_plan_timeout_seconds`'s matching raise above.
+    rlm_max_total_sub_agent_calls: int = Field(default=8, ge=1)
 
     @field_validator("rerank_monthly_budget")
     @classmethod

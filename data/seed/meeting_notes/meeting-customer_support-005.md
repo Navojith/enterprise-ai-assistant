@@ -18,4 +18,4 @@ The group reviewed the current status related to "Customer Support Escalations W
 
 ## Action Items
 
-Action items were assigned with owners and target dates, to be followed up on in the next recurring sync.
+The team agreed to review the tickets that breached their resolution timeframe this week, to identify whether any share a common root cause worth escalating to engineering, and to check back on open escalations at next week's sync.

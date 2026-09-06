@@ -14,12 +14,12 @@ This document describes the architecture of the system covered by "Customer Supp
 
 ## Components
 
-The system is composed of a request-handling service layer, a persistence layer backed by a managed relational database, and an asynchronous event stream used to propagate state changes to downstream consumers.
+The platform consists of a ticket-intake service accepting requests from chat, email, and phone channels, a routing engine assigning tickets to the appropriate queue, and an agent workspace surfacing customer and account context alongside each ticket.
 
 ## Reliability Considerations
 
-The system is designed to degrade gracefully under partial failure: downstream dependencies are called with bounded timeouts and circuit breakers, and critical paths have a documented fallback behavior rather than failing the entire request.
+The routing engine falls back to a single general queue if a specialized queue's assignment rules cannot be evaluated, so a routing-configuration error delays specialization rather than losing or blocking incoming tickets.
 
 ## Related Runbooks
 
-Operational procedures for responding to failures in this system are maintained separately in the corresponding runbook documents.
+Operational procedures for this system are covered by the "Support Queue Overload Runbook".

@@ -14,8 +14,8 @@ Customers and internal stakeholders have identified a need addressed by "Multi-C
 
 ## Requirements
 
-The feature must be available across supported platforms, must degrade gracefully when a dependent service is unavailable, and must be observable enough to diagnose issues in production without requiring a code change.
+The ledger must record each transaction's original currency and the exchange rate used at the time of conversion, must support reporting account balances in a customer's preferred display currency without altering the underlying recorded currency, and must reject a transaction if no exchange rate is available for the required currency pair.
 
 ## Out of Scope
 
-This specification does not cover changes to unrelated systems; any dependency identified during implementation should be raised as a separate specification.
+This specification does not cover hedging or exposure management for currency risk, which is handled by treasury operations outside this system.

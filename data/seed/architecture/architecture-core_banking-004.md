@@ -14,12 +14,12 @@ This document describes the architecture of the system covered by "Batch Settlem
 
 ## Components
 
-The system is composed of a request-handling service layer, a persistence layer backed by a managed relational database, and an asynchronous event stream used to propagate state changes to downstream consumers.
+The pipeline consists of a file-ingestion stage that validates incoming settlement files, a transformation stage that maps them to the internal ledger format, and a posting stage that applies the resulting entries to the ledger in order.
 
 ## Reliability Considerations
 
-The system is designed to degrade gracefully under partial failure: downstream dependencies are called with bounded timeouts and circuit breakers, and critical paths have a documented fallback behavior rather than failing the entire request.
+Each stage checkpoints its progress so a failure partway through a run can resume from the last completed record rather than reprocessing the entire batch, and the posting stage is idempotent so a retried record cannot be applied twice.
 
 ## Related Runbooks
 
-Operational procedures for responding to failures in this system are maintained separately in the corresponding runbook documents.
+Operational procedures for this system are covered by the following runbooks: "Ledger Database Failover Runbook"; "End-of-Day Batch Recovery Runbook"; "Database Connection Pool Exhaustion Runbook".

@@ -33,7 +33,12 @@ class _FakeLLM:
         self.last_messages: Sequence[BaseMessage] | None = None
 
     async def astructured(
-        self, messages: Sequence[BaseMessage], *, schema: type[SchemaT], reasoning: bool = False
+        self,
+        messages: Sequence[BaseMessage],
+        *,
+        schema: type[SchemaT],
+        reasoning: bool = False,
+        temperature: float | None = None,
     ) -> SchemaT:
         self.last_messages = messages
         assert isinstance(self._response, schema)

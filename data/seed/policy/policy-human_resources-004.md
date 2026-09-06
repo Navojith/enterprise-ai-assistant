@@ -14,8 +14,8 @@ This policy, "Employee Code of Conduct Policy", establishes the bank's requireme
 
 ## Policy Statement
 
-All personnel must comply with the requirements set out in this document. Exceptions require documented approval from the relevant department lead and must be time-bound and reviewed periodically.
+Employees are expected to act with honesty and professionalism, avoid conflicts of interest, and treat colleagues and customers with respect regardless of role or seniority.
 
 ## Enforcement
 
-Violations of this policy are handled according to the bank's standard disciplinary process and may be escalated to compliance or legal depending on severity.
+Reported violations are investigated by HR, and outcomes range from coaching for a minor first occurrence to termination for serious or repeated misconduct, consistent with the bank's standard disciplinary process.

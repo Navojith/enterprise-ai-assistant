@@ -277,6 +277,50 @@ default. `Settings.rlm_plan_timeout_seconds` was raised from 90s to 180s to matc
 execution of a full research turn (plan generation, search, up to four sequential sub-agent
 analyses, aggregation) measured 90–150s live on this hardware.
 
+A later session raised all three of these numbers again — `llm_request_timeout_seconds` 30s ->
+90s, `llm_circuit_breaker_failure_threshold` 3 -> 5, and `rlm_plan_timeout_seconds` 180s -> 450s
+— after live testing found the 180s figure above was itself measured against calls that
+happened to skip `reasoning=True`'s extra generation cost; `rlm/api.py`'s actual sub-agent and
+aggregate calls run with reasoning on (so the panel can show their thinking), which the earlier
+measurement did not account for, and routinely pushed individual calls well past the 30s
+per-call timeout — tripping the circuit breaker and failing the whole turn, the identical
+failure shape as the paragraph above, just triggered by request latency instead of concurrent
+fan-out. Full investigation, including two further correctness bugs the same session found once
+the turn could complete at all, in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 27.
+
+A third session raised `rlm_max_total_sub_agent_calls` 4 -> 8 and `rlm_plan_timeout_seconds`
+450s -> 750s together, after a real quality gap surfaced by comparing the "research" route's
+answer against the plain "retrieval" route's answer to the identical question
+(`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28): once that same session's `group_by_document`
+fix made batching correctly respect document boundaries, 4 sub-agent calls covers only a
+handful of whole documents — well under the seed corpus's real ~10-15 payment incidents for the
+spec's own example question — where the previous fixed-size `batch()` had (inaccurately) spread
+thinner across more of them. Raising the call count without also raising the wall-clock budget
+would have just traded one failure for another (the same shape as the two raises above: more
+sequential reasoning-enabled calls need more total time, not just more per-call headroom), so
+both moved together, sized off live-measured 55-90s-per-call figures. `frontend/api_client.py`'s
+own client-side `stream_chat_turn` timeout was found in the same pass to have already drifted
+stale below the backend's *previous* 450s budget (still defaulting to an old 240s), a client-side
+truncation risk with the identical shape as a circuit-breaker trip above; raised to 900s and its
+rationale comment corrected to cite the current backend figure instead of a two-raises-old one.
+
+A fourth session widened `rlm/api.py::build_search`'s department-scoped merge budget from
+`top_k` to `top_k * 2`, after a live reproduction found the narrower budget could make a wrong
+department guess *strictly worse than no scoping at all* — a wrong-department search still fills
+every slot with irrelevant chunks (`hybrid_search` never returns "no good match" for a namespace,
+only its nearest neighbors), and the pre-fix merge kept all of them unconditionally, leaving zero
+room for the correct all-department result. This was put to the user as an explicit choice rather
+than picked unilaterally, because it trades away something real: a scoped `search()` call can now
+return up to twice its requested `top_k` chunks, growing a plan's own `batch`/`group_by_document`
+count and `RLMBudget` spend correspondingly — the exact cost this module's merge call had
+originally been sized to avoid. The user chose to accept that cost over a narrower,
+`top_k`-preserving alternative (a fixed reservation quota for unscoped results), because live
+testing showed the narrower option would not have recovered the reported case either — the
+genuinely relevant chunks were buried too deep in the plain all-department ranking (rank ~18-38
+of a fully-ranked ~224-chunk corpus) for any quota short of "give unscoped its own full budget"
+to reach them. `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 29 has the full investigation,
+including the RRF-based merge alternative that was tried and measured before being rejected.
+
 ---
 
 ## 10. Prompt-injection detection: heuristics first, classifier only when ambiguous
@@ -399,3 +443,116 @@ oversight: `docs/DECISIONS.md` §2 already scopes long-term memory (a persistent
 store) out as a bonus item not built, and the two mechanisms above are explicitly *session*
 memory — "session" meaning "this `thread_id`," not "this browser session" or "this user across
 every conversation they've ever had" (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` assumption 3).
+
+---
+
+## 13. `aggregate`'s citation-completeness check and bounded retry, and why it stops there
+
+`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's investigation (first and second addenda)
+root-caused the `"research"` route occasionally producing a visibly worse answer than
+`"retrieval"` on the identical question to irreducible LLM-sampling variance across the RLM
+pipeline's 3–4 sequential generative calls, not a coverage gap or a code defect — every stage,
+replayed independently against the live model, was individually correct. The user, asked
+explicitly whether to mitigate this or accept it as documented variance, chose a targeted
+mitigation over both extremes ("accept as-is" and "no large architectural change"), scoped to
+exactly one place: `rlm/api.py::build_aggregate`, the step that reduces several independently-
+correct sub-agent findings into the one summary a research turn's answer is actually built from.
+
+**Why `aggregate` specifically, not the whole pipeline.** A self-consistency or retry mechanism
+added at every stage (sub-agent findings, `aggregate`, the final Response call) would multiply
+latency across an already-expensive pipeline (`docs/DECISIONS.md` §9) for diminishing return —
+`aggregate` is the one stage that both *sees everything* (every sub-agent's finding, in one
+call) and is the last point before that information either survives into the final answer or is
+lost for good. A dropped citation here is unrecoverable downstream; a slightly-imperfect
+individual sub-agent finding usually is not, since `aggregate` synthesizes across several of
+them.
+
+**The mechanism, deliberately narrow:**
+
+1. **Citation-presence check, not a correctness check.** `_missing_citations` compares every
+   bracketed `[Title]` the raw findings actually contained against those the aggregated
+   `summary` mentions — checking that the aggregate prompt's own existing instruction ("keep
+   their citations intact") was followed, not re-judging whether the *content* is accurate.
+   This is deliberately not a fuzzy or semantic check: citations are a small, well-defined
+   substring the prompt already asks to preserve verbatim, so checking for their literal
+   presence catches real evidence loss without penalizing legitimate paraphrasing of everything
+   else — the brittleness the user explicitly asked to avoid would come from diffing prose or
+   phrasing, not from checking whether a citation survived at all.
+2. **At most one retry**, firing only when the check finds a gap, feeding back exactly which
+   citations were dropped (the same "one retry with concrete feedback" shape
+   `rlm/planner.py::_retry_messages` already uses for AST validation failures, applied here to
+   an incompleteness signal instead of a syntax one). Never unconditional, never loops: an
+   `AppError` on the retry call, or a retry that does not actually reduce how many citations are
+   missing, both fall back to the original, already-valid (if incomplete) result rather than
+   discarding it or trying again.
+3. **A lower temperature** (`_AGGREGATE_TEMPERATURE = 0.2`) on both the initial and retry calls
+   — threaded through a new optional `temperature: float | None = None` parameter added to
+   `LLMProvider.astructured` (and `OllamaProvider`/`FallbackChain`'s implementations), defaulting
+   to `None` everywhere else so no existing call site's behavior changes. `aggregate` is a
+   one-shot reduction over an already-fixed, already-correct set of findings — synthesis, not
+   exploration — unlike the RLM planner, which benefits from the provider's default temperature
+   because generating a varied *strategy* is exactly what that step should be free to do.
+
+**What this does and does not claim to fix.** This is explicitly a *completeness* guard, not a
+*correctness* one: it can only recover evidence a sub-agent actually returned that aggregation
+then dropped. It has no visibility into, and does not claim to address, evidence the search or
+planning stages failed to retrieve in the first place (trade-off 28's first addendum's "narrow
+plan" problem is a different failure mode this does not touch), nor a sub-agent's own finding
+being wrong, nor the aggregated summary reaching an internally inconsistent conclusion despite
+complete evidence (observed live in the same verification pass that confirmed the fix working —
+see trade-off 28's third addendum). Distinguishing what a fix at this one stage can and cannot
+plausibly cover, rather than letting a narrow, verified improvement read as "the variance
+problem is now solved," was treated as more important than looking maximally finished.
+
+**Verified live, not just unit-tested — twice, independently.** 5 new tests
+(`tests/rlm/test_api.py`'s `TestAggregateCompletenessCheck`, 373 total) cover a clean pass, a
+retry that improves, a retry that does not, and a retry call that itself fails — but the
+mitigation was also replayed through the *real* `build_aggregate` wiring against live Ollama
+twice: once against real sub-agent findings from the original investigation, and once (after
+the fix had already shipped) on a completely fresh live draw of the whole pipeline, requested
+specifically to rule out the first result being a one-off. Both runs demonstrated the fix
+earning its keep, not merely passing tests: both times the initial `aggregate` call's summary
+dropped several real citations on its first attempt, and both times the bounded retry fired
+automatically and recovered a complete, correctly-cited summary — direct, twice-replicated
+evidence that the specific failure mode this was built for is real and recoverable, not a
+one-off or merely theoretically possible. The second run also surfaced, live, the concrete
+shape of the boundary described above: one sub-agent call failed outright (a genuine Ollama
+timeout), losing that batch's evidence before it ever reached `aggregate` — a real instance of
+the "evidence lost upstream" case this fix does not and cannot cover, exactly as scoped. Full
+narrative of both runs in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's third and fourth
+addenda.
+
+---
+
+## 14. The Tools node's choice schema always offers an explicit decline option
+
+A user reported `python_analysis` failing with `NameError: name 'python_analysis' is not
+defined` on a question the `"tools"` route has no way to actually serve — it has no retrieval
+step, so with nothing real to compute over, the model either echoed the tool's own name back as
+literal (non-runnable) code, or fabricated an entirely invented dataset and confidently computed
+over it as if real (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 30). Three options were put to
+the user rather than one picked unilaterally: sharpen the routing/tool-description prompts alone;
+sharpen them plus add an anti-fabrication instruction as a fill-args-level safety net; or a
+structural fix, adding an explicit "no suitable tool" option to `agents/nodes/tools.py::
+_build_choice_schema`'s `Literal` so the model is never forced to name a tool at all. The user
+chose the prompt-level fix first, then — after live re-verification showed the fill-args safety
+net alone did not reliably prevent fabrication, and that the choice schema had no way to express
+"none of these fit" even when the model's own `reasoning` field said exactly that — explicitly
+asked for the structural fix on top.
+
+**Why this is the right layer to fix it at, not just a prompt.** Prompting can make a wrong
+choice *less likely*; it cannot make a *forced* choice safe, because the schema itself defines
+the space of things the model is even allowed to say. Adding `_NO_SUITABLE_TOOL` to the
+`Literal` alongside the real tool names — always, regardless of which tools a role has — removes
+the forcing function directly: `tools_node` short-circuits on that choice before the fill-args
+call ever runs, so there is no `code`/`data` for the model to fabricate in the first place. This
+mirrors §10's classifier-escalation reasoning applied to a different layer: don't rely on
+prompting to prevent a model from doing something it structurally *can* still do; change what it
+can do instead.
+
+**Live-verified, not assumed to close the gap**: the real choice-stage call, 8 times for the
+identical question, now declines via `_NO_SUITABLE_TOOL` 7 of 8 times (vs. 0 of 3 before this
+fix existed); the real `tools_node` function itself, 5 times in a row, produced the clean
+short-circuit every time — correct event sequence, no fill-args call, no chance to fabricate.
+Not claimed as eliminating the risk entirely: the 1-of-8 residual case is recorded, not smoothed
+over, in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 30's addendum.

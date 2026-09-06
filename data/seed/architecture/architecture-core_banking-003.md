@@ -14,12 +14,12 @@ This document describes the architecture of the system covered by "Core Ledger S
 
 ## Components
 
-The system is composed of a request-handling service layer, a persistence layer backed by a managed relational database, and an asynchronous event stream used to propagate state changes to downstream consumers.
+The ledger is built around an append-only transaction log, a materialized balance view rebuilt from that log, and a primary-replica database cluster that serves reads from replicas and all writes from the primary.
 
 ## Reliability Considerations
 
-The system is designed to degrade gracefully under partial failure: downstream dependencies are called with bounded timeouts and circuit breakers, and critical paths have a documented fallback behavior rather than failing the entire request.
+Every write to the transaction log is synchronously replicated to at least one standby before being acknowledged, so a primary failure cannot lose an already-confirmed transaction, and balance reads can fall back to the append-only log if the materialized view is temporarily unavailable.
 
 ## Related Runbooks
 
-Operational procedures for responding to failures in this system are maintained separately in the corresponding runbook documents.
+Operational procedures for this system are covered by the following runbooks: "Ledger Database Failover Runbook"; "End-of-Day Batch Recovery Runbook"; "Database Connection Pool Exhaustion Runbook".

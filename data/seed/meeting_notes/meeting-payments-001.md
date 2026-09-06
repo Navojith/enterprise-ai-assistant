@@ -18,4 +18,4 @@ The group reviewed the current status related to "Payments Platform Incident Pos
 
 ## Action Items
 
-Action items were assigned with owners and target dates, to be followed up on in the next recurring sync.
+The team agreed to add an explicit alert for the specific failure signal that delayed detection during the incident, to update the relevant runbook with the mitigation steps that proved effective, and to schedule a follow-up review in one month to confirm the alert catches the condition reliably.

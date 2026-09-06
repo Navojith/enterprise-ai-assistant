@@ -14,16 +14,16 @@ This runbook defines the standard operating procedure for the payments on-call t
 
 ## Detection
 
-This condition is typically surfaced by an automated alert tied to an elevated error rate, latency, or queue-depth threshold specific to the affected system.
+The nightly reconciliation job flags a mismatch when the settled transaction count or total value differs from the internal ledger by more than the configured tolerance.
 
 ## Response Steps
 
-1. Acknowledge the alert and confirm the affected system.
-2. Check the system's current health dashboard for corroborating signals before taking action.
-3. Apply the documented mitigation for this failure mode.
-4. Confirm recovery against the same signal that triggered the alert.
-5. Open a follow-up ticket for any remediation that could not be completed during the incident.
+1. Pull the card network's settlement file and the internal ledger export for the affected settlement date.
+2. Run the reconciliation diff tool to isolate the specific transactions causing the mismatch.
+3. Classify each discrepancy as a timing difference, a declined-but-recorded transaction, or a genuine data error.
+4. Correct genuine data errors in the ledger and document timing differences expected to resolve on the next settlement cycle.
+5. Confirm the corrected totals reconcile before closing the ticket.
 
 ## Escalation
 
-If the mitigation does not restore normal operation within the runbook's expected recovery window, escalate to the platform engineering on-call rotation.
+If the discrepancy exceeds the regulatory reporting threshold or cannot be explained within one business day, escalate to the payments finance team and start the incident disclosure process.

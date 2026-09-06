@@ -14,16 +14,16 @@ This runbook defines the standard operating procedure for the core banking on-ca
 
 ## Detection
 
-This condition is typically surfaced by an automated alert tied to an elevated error rate, latency, or queue-depth threshold specific to the affected system.
+The batch orchestrator alerts when a stage has not reported progress within its expected runtime window, visible on the End-of-Day Batch dashboard's stage timeline.
 
 ## Response Steps
 
-1. Acknowledge the alert and confirm the affected system.
-2. Check the system's current health dashboard for corroborating signals before taking action.
-3. Apply the documented mitigation for this failure mode.
-4. Confirm recovery against the same signal that triggered the alert.
-5. Open a follow-up ticket for any remediation that could not be completed during the incident.
+1. Identify which batch stage stalled from the orchestrator's stage timeline.
+2. Check that stage's logs for the specific record or partition that caused the failure.
+3. Retry the stalled stage in isolation once the underlying data or resource issue is fixed.
+4. Confirm downstream stages resume automatically once the stalled stage completes.
+5. Verify the batch's completion report matches the expected record counts before close-of-business.
 
 ## Escalation
 
-If the mitigation does not restore normal operation within the runbook's expected recovery window, escalate to the platform engineering on-call rotation.
+If the batch cannot complete before the regulatory cutoff time, escalate to the core banking engineering lead and notify operations that reporting will be delayed.

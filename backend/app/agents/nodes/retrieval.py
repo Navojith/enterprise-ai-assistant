@@ -9,10 +9,38 @@ anything the model has said, so retrieval cannot be widened by a prompt.
 A `VectorStoreUnavailableError` degrades to an empty result (`docs/ARCHITECTURE.md`'s
 "Failure and degradation" table) rather than failing the turn — the Response node already
 handles "no evidence" by saying so explicitly rather than fabricating an answer.
+
+The search query is `state["search_query"]` — the Supervisor's context-resolved rewrite of the
+user's latest message (`agents/nodes/supervisor.py`'s module docstring,
+`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26) — not the raw message text. A follow-up like
+"what are the response steps in that document?" carries almost no retrievable signal on its own;
+searching with it verbatim was verified live to return chunks from unrelated departments rather
+than the document actually under discussion. `_latest_user_text` remains as the fallback for the
+(untested-in-practice) case of `search_query` being unset, so this node degrades to its old
+behavior rather than raising if it is ever reached without the Supervisor having run first.
+
+`state["search_department"]`, when the Supervisor could identify one, *prioritizes* that
+department rather than replacing the search with it
+(`retrieval/hybrid.py::merge_prioritizing_scoped`) — a department-scoped search runs alongside
+the existing all-department one, never instead of it. The RLM path (`rlm/api.py::build_search`)
+applies the identical fix for the identical reason; the merge function itself lives in
+`retrieval/hybrid.py` so the two call sites can never drift apart.
+An earlier version of this fix passed the guessed department straight through to
+`hybrid_search`'s `namespaces` parameter, excluding every other department outright. Verified
+live that this was a real regression, not just an incomplete fix: a 4B model's department guess
+is not reliably grounded (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26's postscript) — asked
+to find the document detailing "certificate rotation", it guessed `core_banking` instead of
+`security`, and asked for the "data retention policy" document, it guessed `product` instead of
+`human_resources`. Hard-scoping to a wrong guess makes the correct document *unreachable*, which
+is strictly worse than the pre-fix behavior this was meant to improve. Running both searches
+means a correct guess still gets the intended benefit — protected from cross-department RRF
+dilution (trade-off 26, cause 3) — while a wrong guess still has the all-department search as a
+full-recall safety net, exactly as before this feature existed.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -24,12 +52,28 @@ from backend.app.agents.context import GraphContext
 from backend.app.agents.state import AgentState
 from backend.app.core.errors import VectorStoreUnavailableError
 from backend.app.observability.events import ActivityEvent, ActivityEventType
-from backend.app.retrieval.hybrid import hybrid_search
+from backend.app.retrieval.hybrid import hybrid_search, merge_prioritizing_scoped
 from backend.app.retrieval.reranker import rerank_chunks
 
 logger = structlog.get_logger(__name__)
 
 _TOP_K = 8
+
+# The cap on the *merged* result when a department is identified — the sum of both searches'
+# own individual budgets (`_TOP_K` each), not `_TOP_K` itself. This was tuned twice, live,
+# before landing here, and both wrong turns are worth recording since either alone reads as
+# plausible: an equal split (`_TOP_K` scoped + `_TOP_K` unscoped, merged cap `_TOP_K`) starved
+# the unscoped safety net completely, because a scoped search into any real department returns
+# a full `_TOP_K` on its own — leaving zero merge budget for the all-department fallback to
+# contribute anything, silently making a wrong department guess exactly as unrecoverable as the
+# hard-scoping this feature was meant to replace. Halving the *scoped* search's own budget
+# instead (to `_TOP_K // 2`) broke the opposite, originally-fixed case: the correct chunk for
+# the exact reported bug's query only ranked 6th *within its own department's* fused results
+# (sparse/BM25 over-rewards several incident "Timeline" sections that happen to mention the
+# word "runbook" in passing), so trimming that list to 4 silently dropped it again. A cap equal
+# to the sum of both full-sized lists is the only one of the three that drops nothing from
+# either list except genuine duplicates — verified live to fix both regressions at once.
+_MERGED_TOP_K = _TOP_K * 2
 
 
 def _latest_user_text(messages: list[AnyMessage]) -> str:
@@ -49,13 +93,14 @@ async def retrieval_node(state: AgentState, runtime: Runtime[GraphContext]) -> d
         )
     )
 
-    query = _latest_user_text(state["messages"])
+    query = state.get("search_query") or _latest_user_text(state["messages"])
+    department = state.get("search_department")
     writer(
         ActivityEvent(
             event_type=ActivityEventType.RETRIEVAL_STATUS,
             node="retrieval",
             message="Querying dense and sparse indexes concurrently.",
-            data={"query": query},
+            data={"query": query, "department": department or "all"},
         )
     )
 
@@ -71,16 +116,32 @@ async def retrieval_node(state: AgentState, runtime: Runtime[GraphContext]) -> d
         return {"retrieved_chunks": []}
 
     settings = runtime.context.settings
+    store = runtime.context.pinecone_store
+    role = state["principal_role"]
     try:
-        fused = await hybrid_search(
-            runtime.context.pinecone_store,
-            query_text=query,
-            role=state["principal_role"],
-            top_k=_TOP_K,
-        )
-        chunks = await rerank_chunks(
-            runtime.context.pinecone_store, query=query, chunks=fused, settings=settings
-        )
+        if department:
+            # Run the scoped and all-department searches concurrently rather than one after
+            # the other — this is one extra Pinecone round-trip per turn, not a sequential
+            # doubling of latency. `return_exceptions=True` so one namespace being unreachable
+            # doesn't take down the other; only propagate if *both* fail (mirrors
+            # `hybrid_search`'s own "a single source degrades, total failure raises" contract).
+            scoped_result, unscoped_result = await asyncio.gather(
+                hybrid_search(
+                    store, query_text=query, role=role, namespaces=[department], top_k=_TOP_K
+                ),
+                hybrid_search(store, query_text=query, role=role, top_k=_TOP_K),
+                return_exceptions=True,
+            )
+            if isinstance(scoped_result, BaseException) and isinstance(
+                unscoped_result, BaseException
+            ):
+                raise unscoped_result
+            scoped = [] if isinstance(scoped_result, BaseException) else scoped_result
+            unscoped = [] if isinstance(unscoped_result, BaseException) else unscoped_result
+            fused = merge_prioritizing_scoped(scoped, unscoped, top_k=_MERGED_TOP_K)
+        else:
+            fused = await hybrid_search(store, query_text=query, role=role, top_k=_TOP_K)
+        chunks = await rerank_chunks(store, query=query, chunks=fused, settings=settings)
     except VectorStoreUnavailableError as exc:
         logger.warning("retrieval_node_degraded", error=str(exc))
         writer(

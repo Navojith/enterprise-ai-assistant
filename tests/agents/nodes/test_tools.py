@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from backend.app.agents.nodes.tools import _build_choice_schema, _describe_tools
+from backend.app.agents.nodes.tools import _NO_SUITABLE_TOOL, _build_choice_schema, _describe_tools
 from backend.app.core.security.rbac import Permission
 from backend.app.tools.registry import ToolResult, ToolSpec
 
@@ -64,3 +64,24 @@ class TestBuildChoiceSchema:
 
         with pytest.raises(ValidationError):
             schema.model_validate({"tool_name": "alpha"})
+
+    def test_no_suitable_tool_is_always_a_valid_choice(self) -> None:
+        """`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 30: without this, the model was
+        structurally forced to name a real tool even when its own reasoning concluded none of
+        them actually helped — this is the escape hatch that fix adds."""
+        schema = _build_choice_schema([_spec("alpha"), _spec("beta")])
+
+        instance = schema.model_validate(
+            {"reasoning": "neither tool can retrieve this", "tool_name": _NO_SUITABLE_TOOL}
+        )
+
+        assert instance.tool_name == _NO_SUITABLE_TOOL  # type: ignore[attr-defined]
+
+    def test_no_suitable_tool_is_offered_even_with_no_real_tools(self) -> None:
+        schema = _build_choice_schema([])
+
+        instance = schema.model_validate(
+            {"reasoning": "no tools at all", "tool_name": _NO_SUITABLE_TOOL}
+        )
+
+        assert instance.tool_name == _NO_SUITABLE_TOOL  # type: ignore[attr-defined]

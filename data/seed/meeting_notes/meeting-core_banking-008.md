@@ -18,4 +18,4 @@ The group reviewed the current status related to "Ledger Migration Planning Meet
 
 ## Action Items
 
-Action items were assigned with owners and target dates, to be followed up on in the next recurring sync.
+The team agreed to draft a rollback plan for the ledger migration, to schedule a dry run in the staging environment before the production cutover, and to confirm the reconciliation process for validating the migrated data.

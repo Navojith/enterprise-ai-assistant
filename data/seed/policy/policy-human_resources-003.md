@@ -14,8 +14,8 @@ This policy, "Data Retention and Deletion Policy", establishes the bank's requir
 
 ## Policy Statement
 
-All personnel must comply with the requirements set out in this document. Exceptions require documented approval from the relevant department lead and must be time-bound and reviewed periodically.
+Employee personal data must be retained only for as long as required by legal or operational need, must be deleted or anonymized once that need ends, and any extended retention beyond the standard schedule requires documented approval from legal and HR leadership.
 
 ## Enforcement
 
-Violations of this policy are handled according to the bank's standard disciplinary process and may be escalated to compliance or legal depending on severity.
+Data found retained past its scheduled deletion date without approval is deleted immediately upon discovery, and the responsible system owner must document why the automated deletion did not run.

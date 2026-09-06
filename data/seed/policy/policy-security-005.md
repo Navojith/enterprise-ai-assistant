@@ -14,8 +14,8 @@ This policy, "Third-Party Vendor Risk Management Policy", establishes the bank's
 
 ## Policy Statement
 
-All personnel must comply with the requirements set out in this document. Exceptions require documented approval from the relevant department lead and must be time-bound and reviewed periodically.
+Any third-party vendor with access to customer data or critical systems must complete a security assessment before onboarding, must be reassessed at least annually, and any finding rated high risk must be remediated or formally accepted by a designated risk owner before the engagement proceeds.
 
 ## Enforcement
 
-Violations of this policy are handled according to the bank's standard disciplinary process and may be escalated to compliance or legal depending on severity.
+A vendor with an overdue reassessment has its access suspended until the assessment is completed, and unremediated high-risk findings are escalated to the vendor risk committee.

@@ -18,4 +18,4 @@ The group reviewed the current status related to "Fraud Alerts Feature Kickoff M
 
 ## Action Items
 
-Action items were assigned with owners and target dates, to be followed up on in the next recurring sync.
+The team agreed on the initial alerting threshold to launch with, to confirm the notification feature's dependency on the fraud-scoring engine's output format, and to schedule a design review before implementation begins.

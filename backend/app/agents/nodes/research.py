@@ -1,9 +1,25 @@
 """Research node: the Supervisor's `"research"` route — the RLM path.
 
-Reuses the latest user message as the research question and delegates everything else to
-`rlm/executor.py::execute_research`: generating a Python search plan, validating and running it
-in `rlm/sandbox.py`, fanning out to recursive sub-agents under a bounded semaphore, and
-aggregating. This node's own job is small and mirrors `agents/nodes/tools.py`'s shape closely —
+Uses `state["search_query"]` — the Supervisor's context-resolved rewrite of the latest message
+(`agents/nodes/supervisor.py`'s module docstring, `docs/ASSUMPTIONS_AND_TRADEOFFS.md`
+trade-off 26) — as the research question, falling back to the raw latest message
+(`_latest_user_text`) if `search_query` is ever unset. A broad research turn is exactly as
+vulnerable to an unresolved follow-up reference as a single-hop retrieval turn is: "and what
+about last month?" names no topic on its own, and the generated search plan can only decompose
+a question it can actually read.
+
+Also passes `state["search_department"]` through to `execute_research` — the RLM path was
+found live to suffer the identical cross-department RRF-dilution problem trade-off 26 already
+fixed for `agents/nodes/retrieval.py`, because `rlm/api.py::build_search`'s `search()`
+primitive ran a plain, unscoped all-department search with no department priority at all. Every
+`RLMContext` this turn creates, including recursive ones, now carries the same department guess
+so a generated plan's `search()` calls benefit from the identical merge-not-replace fix
+(`retrieval/hybrid.py::merge_prioritizing_scoped`), not just the single-hop retrieval path.
+
+Delegates everything else to `rlm/executor.py::execute_research`: generating a Python search
+plan, validating and running it in `rlm/sandbox.py`, fanning out to recursive sub-agents under
+a bounded semaphore, and aggregating. This node's own job is small and mirrors
+`agents/nodes/tools.py`'s shape closely —
 read the principal, call through to the one place authorization and execution actually happen,
 turn the outcome (or any failure) into activity events and state, never let a degradation crash
 the turn.
@@ -51,14 +67,28 @@ def _stringify_research_result(result: Any) -> str:
     Mirrors `rlm/executor.py::_stringify`'s unwrapping of `aggregate`'s dict shape, applied
     here to the *final* result rather than a nested call's — kept as a separate, small
     function instead of importing the private one, since the two are allowed to diverge (this
-    one, for instance, could show `recurring_themes` too)."""
+    one, for instance, could show `recurring_themes` too).
+
+    Any dict key beyond `summary`/`recurring_themes` is rendered too, as a `Title Case: value`
+    line — added so a plan that extends `aggregate()`'s dict with a computed field (e.g.
+    `result["counts"] = count_by_month(chunks)`, per `rlm/planner.py`'s system prompt) actually
+    reaches the user, instead of the real computed numbers being silently dropped because this
+    function only ever looked for two specific keys. Only applies once a `summary` is present —
+    a dict with no `summary` key falls through to a plain `str(result)` exactly as before, since
+    there is no established shape to render field-by-field otherwise.
+    """
     if isinstance(result, dict):
         summary = result.get("summary")
-        themes = result.get("recurring_themes")
         if summary is not None:
+            parts = [str(summary)]
+            themes = result.get("recurring_themes")
             if themes:
-                return f"{summary}\n\nRecurring themes: {', '.join(str(theme) for theme in themes)}"
-            return str(summary)
+                parts.append(f"Recurring themes: {', '.join(str(theme) for theme in themes)}")
+            for key, value in result.items():
+                if key in ("summary", "recurring_themes") or not value:
+                    continue
+                parts.append(f"{key.replace('_', ' ').title()}: {value}")
+            return "\n\n".join(parts)
     return str(result)
 
 
@@ -72,7 +102,7 @@ async def research_node(state: AgentState, runtime: Runtime[GraphContext]) -> di
         )
     )
 
-    question = _latest_user_text(state["messages"])
+    question = state.get("search_query") or _latest_user_text(state["messages"])
     principal = principal_from_state(state)
     settings = runtime.context.settings
 
@@ -84,6 +114,7 @@ async def research_node(state: AgentState, runtime: Runtime[GraphContext]) -> di
             store=runtime.context.pinecone_store,
             llm=runtime.context.llm,
             settings=settings,
+            department=state.get("search_department"),
         )
     except AppError as exc:
         logger.warning("research_node_degraded", error=str(exc))

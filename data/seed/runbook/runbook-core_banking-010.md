@@ -14,16 +14,16 @@ This runbook defines the standard operating procedure for the core banking on-ca
 
 ## Detection
 
-This condition is typically surfaced by an automated alert tied to an elevated error rate, latency, or queue-depth threshold specific to the affected system.
+The connection-pool monitor alerts when active connections reach the pool's configured ceiling for more than one minute, visible on the affected service's dashboard.
 
 ## Response Steps
 
-1. Acknowledge the alert and confirm the affected system.
-2. Check the system's current health dashboard for corroborating signals before taking action.
-3. Apply the documented mitigation for this failure mode.
-4. Confirm recovery against the same signal that triggered the alert.
-5. Open a follow-up ticket for any remediation that could not be completed during the incident.
+1. Identify the affected service and confirm whether the exhaustion is caused by a connection leak or a genuine traffic increase.
+2. If a leak, identify and restart the specific instance holding stale connections rather than the whole fleet.
+3. If traffic-driven, temporarily raise the pool ceiling within the database's documented connection limit.
+4. Confirm queued requests drain and the pool's active-connection count returns below the alert threshold.
+5. File a follow-up ticket to fix the leak or right-size the pool permanently once the immediate pressure is relieved.
 
 ## Escalation
 
-If the mitigation does not restore normal operation within the runbook's expected recovery window, escalate to the platform engineering on-call rotation.
+If raising the pool ceiling risks exceeding the database's total connection limit shared across services, escalate to the database engineering on-call rotation before making the change.

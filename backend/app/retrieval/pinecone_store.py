@@ -156,7 +156,7 @@ class PineconeStore:
                 chunk_id=hit.id,
                 document_id=hit.fields["document_id"],
                 section=hit.fields["section"],
-                text=hit.fields[_TEXT_FIELD],
+                text=hit.fields["section_text"],
                 title=hit.fields["title"],
                 department=hit.fields["department"],
                 document_type=hit.fields["document_type"],

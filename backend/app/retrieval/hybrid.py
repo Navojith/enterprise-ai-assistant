@@ -115,3 +115,35 @@ async def hybrid_search(
 
     fused = reciprocal_rank_fusion(ranked_lists)
     return fused[:top_k]
+
+
+def merge_prioritizing_scoped(
+    scoped: list[RetrievedChunk], unscoped: list[RetrievedChunk], *, top_k: int
+) -> list[RetrievedChunk]:
+    """Combine a department-scoped search with an all-department search, keeping every scoped
+    hit — it already survived competing only against its own department, so it is never crowded
+    out by another department's unrelated top-ranked chunk — and filling any remaining slots
+    from the unscoped list, deduped by `chunk_id`, preserving each list's own order. `scoped` is
+    empty when no department was identified, in which case this is a no-op that returns
+    `unscoped` unchanged (aside from the redundant but harmless re-truncation).
+
+    Shared by `agents/nodes/retrieval.py` (the single-hop retrieval path) and `rlm/api.py`
+    (the RLM sandbox's `search` primitive) — both need the identical fix for the identical
+    problem: Reciprocal Rank Fusion scores purely by each chunk's rank *within its own list*, so
+    several irrelevant departments' locally-top-ranked chunks can collectively outweigh the one
+    genuinely relevant department's correct answer once every department is fused together
+    (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26). An earlier version of this fix lived only
+    in `agents/nodes/retrieval.py`; the RLM path's own unscoped `search()` call was found, live,
+    to suffer the identical dilution — see trade-off 26's postscript.
+
+    Never hard-scopes to `scoped` alone: a 4B model's department guess is not reliably grounded,
+    and excluding every other department outright made a wrong guess turn a document
+    *unreachable* rather than merely diluted — verified live as a real regression before this
+    merge-not-replace shape replaced it.
+    """
+    merged: dict[str, RetrievedChunk] = {chunk.chunk_id: chunk for chunk in scoped}
+    for chunk in unscoped:
+        if len(merged) >= top_k:
+            break
+        merged.setdefault(chunk.chunk_id, chunk)
+    return list(merged.values())[:top_k]

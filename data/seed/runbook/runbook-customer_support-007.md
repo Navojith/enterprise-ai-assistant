@@ -14,16 +14,16 @@ This runbook defines the standard operating procedure for the customer support o
 
 ## Detection
 
-This condition is typically surfaced by an automated alert tied to an elevated error rate, latency, or queue-depth threshold specific to the affected system.
+The support platform alerts when the open-ticket queue depth or average wait time exceeds the configured threshold, visible on the Support Queue dashboard.
 
 ## Response Steps
 
-1. Acknowledge the alert and confirm the affected system.
-2. Check the system's current health dashboard for corroborating signals before taking action.
-3. Apply the documented mitigation for this failure mode.
-4. Confirm recovery against the same signal that triggered the alert.
-5. Open a follow-up ticket for any remediation that could not be completed during the incident.
+1. Confirm whether the backlog is driven by a genuine incident (a product outage generating duplicate tickets) or a staffing shortfall.
+2. If an incident is the cause, post a status-page update to reduce duplicate ticket volume.
+3. Activate the on-call overflow staffing plan to bring additional agents online.
+4. Triage the queue by priority so account-security and payment-related tickets are handled first.
+5. Confirm the queue depth returns below threshold before standing down the overflow plan.
 
 ## Escalation
 
-If the mitigation does not restore normal operation within the runbook's expected recovery window, escalate to the platform engineering on-call rotation.
+If the backlog is caused by an ongoing product incident, escalate to that product line's incident commander rather than treating it as a support-capacity issue alone.

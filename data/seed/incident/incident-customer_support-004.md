@@ -14,8 +14,8 @@ On 2026-08-13, the customer support team responded to an incident involving supp
 
 ## Impact
 
-Impact was contained to internal operations and a subset of customer-facing functionality for the duration of the incident.
+The open-ticket queue grew to more than three times its normal depth during the launch window, and average first-response time increased from under 10 minutes to over an hour.
 
 ## Resolution
 
-The team applied the relevant runbook, restored normal operation, and scheduled a follow-up review to assess whether additional safeguards were warranted.
+The team activated the overflow staffing plan and posted a status update to reduce duplicate tickets about the same known issue; the queue returned to its normal depth within four hours.

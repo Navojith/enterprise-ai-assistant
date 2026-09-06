@@ -14,8 +14,8 @@ Customers and internal stakeholders have identified a need addressed by "Employe
 
 ## Requirements
 
-The feature must be available across supported platforms, must degrade gracefully when a dependent service is unavailable, and must be observable enough to diagnose issues in production without requiring a code change.
+The portal must let an employee update their own contact information and banking details for payroll without HR intervention, must require re-authentication before a sensitive field like banking details can be changed, and must notify HR of any change to a field subject to compliance review.
 
 ## Out of Scope
 
-This specification does not cover changes to unrelated systems; any dependency identified during implementation should be raised as a separate specification.
+This specification does not cover manager-initiated changes such as compensation adjustments, which remain in the existing HR system's approval workflow.

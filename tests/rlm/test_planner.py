@@ -26,11 +26,21 @@ class _FakeLLM:
         self._plans = list(plans or [])
         self._error = error
         self.calls = 0
+        # Recorded per call so a test can assert what the system prompt actually contained —
+        # e.g. that it leads with the real current date (trade-off 31), not just how many
+        # times the model was called.
+        self.messages_received: list[Sequence[BaseMessage]] = []
 
     async def astructured(
-        self, messages: Sequence[BaseMessage], *, schema: type[SchemaT], reasoning: bool = False
+        self,
+        messages: Sequence[BaseMessage],
+        *,
+        schema: type[SchemaT],
+        reasoning: bool = False,
+        temperature: float | None = None,
     ) -> SchemaT:
         self.calls += 1
+        self.messages_received.append(messages)
         if self._error is not None:
             raise self._error
         plan = self._plans[self.calls - 1]
@@ -52,7 +62,7 @@ class TestDeterministicFallbackPlan:
         code = deterministic_fallback_plan("what happened?")
 
         assert "result" in code
-        for name in ("search", "batch", "sub_agents", "aggregate"):
+        for name in ("search", "group_by_document", "sub_agents", "aggregate"):
             assert name in code
         for forbidden in ("import ", "open(", "exec(", "eval("):
             assert forbidden not in code
@@ -104,3 +114,14 @@ class TestGeneratePlan:
         assert code == deterministic_fallback_plan("what happened?")
         assert used_fallback is True
         assert llm.calls == 1
+
+    async def test_the_system_prompt_leads_with_the_real_current_date(self) -> None:
+        """`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 31: a plan reasoning about "this
+        year"/"last year"/a specific year needs the real current date, not `qwen3:4b`'s own
+        stale, pre-cutoff sense of "now"."""
+        llm = _FakeLLM(plans=[ResearchPlan(reasoning="strategy", code="result = search('q')")])
+
+        await generate_plan("what happened?", llm=llm)
+
+        system_message = llm.messages_received[0][0]
+        assert str(system_message.content).startswith("Today's date is ")

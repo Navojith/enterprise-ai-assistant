@@ -14,8 +14,8 @@ On 2026-02-12, the security team responded to an incident involving elevated fai
 
 ## Impact
 
-Impact was contained to internal operations and a subset of customer-facing functionality for the duration of the incident.
+A spike in failed login attempts was observed against the customer login endpoint. No accounts were confirmed compromised, but the elevated load briefly increased login latency for legitimate customers.
 
 ## Resolution
 
-The team applied the relevant runbook, restored normal operation, and scheduled a follow-up review to assess whether additional safeguards were warranted.
+The security team enabled the elevated rate-limiting profile on the login endpoint and blocked the source IP ranges at the edge; login latency returned to normal within 10 minutes. A password reset was forced for the small number of accounts that showed suspicious activity.

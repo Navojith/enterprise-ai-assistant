@@ -14,8 +14,8 @@ This policy, "Password and Multi-Factor Authentication Policy", establishes the 
 
 ## Policy Statement
 
-All personnel must comply with the requirements set out in this document. Exceptions require documented approval from the relevant department lead and must be time-bound and reviewed periodically.
+Every employee account must be protected by multi-factor authentication, passwords must meet the bank's minimum complexity and rotation requirements, and a shared or generic account password must never be used for an individual employee's access.
 
 ## Enforcement
 
-Violations of this policy are handled according to the bank's standard disciplinary process and may be escalated to compliance or legal depending on severity.
+An account found without multi-factor authentication enabled is suspended until it is configured, and sharing credentials is treated as a security incident subject to the standard incident response process.

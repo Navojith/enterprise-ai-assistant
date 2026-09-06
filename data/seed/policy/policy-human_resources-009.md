@@ -14,8 +14,8 @@ This policy, "Remote Work and Device Security Policy", establishes the bank's re
 
 ## Policy Statement
 
-All personnel must comply with the requirements set out in this document. Exceptions require documented approval from the relevant department lead and must be time-bound and reviewed periodically.
+Any device used to access bank systems remotely must have disk encryption and up-to-date endpoint security software enabled, and remote access to internal systems must go through the bank's managed VPN rather than a direct connection.
 
 ## Enforcement
 
-Violations of this policy are handled according to the bank's standard disciplinary process and may be escalated to compliance or legal depending on severity.
+A device found out of compliance has its access suspended until the required security controls are confirmed in place, and repeated non-compliance is escalated to the employee's manager and IT security.

@@ -18,4 +18,4 @@ The group reviewed the current status related to "Quarterly Security Posture Rev
 
 ## Action Items
 
-Action items were assigned with owners and target dates, to be followed up on in the next recurring sync.
+The team agreed to close out the remaining findings from the last vendor risk assessment, to schedule the next round of access reviews for confidential systems, and to report progress on both items at the following quarter's review.

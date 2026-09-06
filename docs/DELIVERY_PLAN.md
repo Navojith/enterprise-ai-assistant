@@ -60,8 +60,11 @@ activity events.
 ### Cycle 4 — Tools and RBAC enforcement · 3h
 
 Tool registry filtering by role at bind time **and** re-checking at the execution boundary ·
-`knowledge_search` · `python_analysis` on the shared sandbox · FastMCP server exposing employee
-directory, service catalog and incident records · async MCP client with timeout handling.
+`knowledge_search` · `python_analysis` on the shared sandbox · an MCP server (`mcp.server.
+mcpserver.MCPServer` — the actual 2.x SDK class; the `FastMCP` name originally assumed here
+turned out to belong to a different, superseded class, `docs/ASSUMPTIONS_AND_TRADEOFFS.md`
+trade-off 15) exposing employee directory, service catalog and incident records · async MCP
+client with timeout handling.
 
 ### Cycle 5 — RLM research agent · 4h
 

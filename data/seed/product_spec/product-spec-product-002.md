@@ -14,8 +14,8 @@ Customers and internal stakeholders have identified a need addressed by "Mobile 
 
 ## Requirements
 
-The feature must be available across supported platforms, must degrade gracefully when a dependent service is unavailable, and must be observable enough to diagnose issues in production without requiring a code change.
+The feature must extract the check amount and account number from a photo with sufficient confidence before submission, must hold deposited funds according to the bank's standard funds-availability schedule, and must flag a photo that fails quality checks for the customer to retake rather than submitting it for processing.
 
 ## Out of Scope
 
-This specification does not cover changes to unrelated systems; any dependency identified during implementation should be raised as a separate specification.
+This specification does not cover deposit limits for business banking accounts, which follow a separate approval workflow.
