@@ -1442,3 +1442,66 @@ this file's own framing throughout: the prompt change makes the *specific* payme
 confusion less likely, it does not make department-guessing reliable in general (trade-off 1's
 model-bound variance still applies), which is exactly why the merge-budget widening, not the
 prompt tweak, is this fix's actual load-bearing safety net.
+
+### 30. The `"tools"` route's `python_analysis` tool fabricated data when routed to with nothing real to analyze — routing-level fix confirmed live effective, fill-args-level safety net honestly confirmed weak
+
+Re-running the live test above through the actual deployed app (not the direct `execute_research`
+call) surfaced a second, distinct, pre-existing bug in the `"tools"` route — unrelated to
+trade-off 29's RLM-path fix, in code trade-off 29 never touched. The identical question sometimes
+routed to `"tools"` instead of `"research"`/`"retrieval"` (model-bound routing variance,
+trade-off 1), chose `python_analysis`, and failed with
+`NameError: name 'python_analysis' is not defined` — traced, by replaying the exact fill-args LLM
+call live 3 times, to something worse than a crash: `agents/nodes/tools.py::tools_node` never
+retrieves anything at all (the `"tools"` route has no retrieval step in it whatsoever, and
+`PythonAnalysisParams.data` is filled purely from the conversation), so with a fresh question and
+no real data available, the model either echoed the tool's own name back as literal
+(non-runnable) `code` — the exact `NameError` reported — or **fabricated an entirely fictional
+dataset** (invented 2023 payment-incident timestamps that do not exist in the corpus) and
+confidently computed over it as if real. The second failure mode only surfaced as an error this
+time because it also used a disallowed `import`; a run that didn't would have returned a
+confident, fully-formed answer computed from data that was never real, with nothing anywhere
+flagging it as invented — a hallucination risk in a different shape than the citation-fabrication
+guardrails already cover.
+
+Presented to the user with three options (sharpen the routing prompt + add an anti-fabrication
+instruction as a safety net; the routing prompt alone; or a structural refusal when no real data
+is present) rather than picked unilaterally; the user chose the first, recommended option.
+Implemented as two changes: `agents/nodes/supervisor.py`'s `ANALYTICS_TOOLS` category text now
+says explicitly that "tools" fits only when the specific values are *already stated* in the
+conversation, never a question requiring a corpus lookup or count; and
+`tools/python_analysis.py`'s tool description and both `PythonAnalysisParams` field descriptions
+(shown at both the tool-choice and fill-args stages, since `agents/nodes/tools.py::
+_FILL_ARGS_PROMPT` surfaces the tool's own description directly) now explicitly forbid inventing
+placeholder data and give the model a concrete alternative (`result = "No data available..."`).
+
+**Live re-verification, done honestly rather than assumed successful, found the two changes have
+very different effectiveness — worth keeping distinct rather than reporting as one uniform win:**
+
+- **The routing-level fix works well.** Calling the real Supervisor prompt and schema directly
+  against live Ollama for the identical question, 5 times, with the full Analyst tool set
+  available (`python_analysis`, `knowledge_search`, and the MCP tools): **0 of 5** chose
+  `"tools"` — 4 chose `"retrieval"`, 1 chose `"research"`, all with the model's own reasoning
+  now explicitly stating "the tool call is only for values already in the conversation, and
+  none are, so this needs retrieval/research first." This is the fix actually doing its job at
+  the layer that matters for a real user turn, and a clear improvement over the pre-fix
+  behavior that triggered this investigation in the first place.
+- **The fill-args-level safety net, tested in isolation (the route forced to `"tools"` as if the
+  routing fix had already failed), did not reliably prevent fabrication.** 2 of 3 fill-args
+  attempts still set `code` to the literal string `"python_analysis"` (the exact original
+  `NameError`); the third produced real code, but over an invented dataset — not one attempt
+  actually followed the new instruction to admit no data was available. Separately,
+  `agents/nodes/tools.py::_build_choice_schema` structurally cannot express "no tool fits" at
+  all — its `Literal` is built only from the tools actually offered, so even when the model's own
+  reasoning concluded "no tool should be called here" (observed live, verbatim, in one choice-stage
+  attempt), it was still forced to name one anyway.
+
+**Net assessment, stated plainly rather than smoothed over**: the chosen fix meaningfully reduces
+how often this failure mode is reached at all (the routing layer, now well-verified), but does
+not eliminate the fabrication risk for whatever residual fraction of turns still reach `"tools"`
+for a question shaped like this one — the fill-args safety net is real but weak, and the
+tool-choice schema's forced selection is an unaddressed structural gap. Left as an open,
+explicitly disclosed decision rather than silently accepted or unilaterally escalated: a
+stronger fix (a "no suitable tool" option in the choice schema, and/or `tools_node` refusing to
+execute `python_analysis` outright when `data` is empty for a question that looks
+evidence-dependent) was offered to the user as the next step, not assumed necessary or applied
+without asking.

@@ -495,6 +495,34 @@ mechanism) rather than requiring any new paid service.
 
 Newest first. One line per meaningful change.
 
+- **2026-09-06** — Found and partially fixed a second, distinct bug in the `"tools"` route,
+  surfaced live-testing the previous entry's fix through the actual deployed app: the identical
+  question sometimes routed to `"tools"` instead of `"research"`/`"retrieval"` (model-routing
+  variance), chose `python_analysis`, and failed with `NameError: name 'python_analysis' is not
+  defined`. Root-caused, live, to something worse than a crash: `agents/nodes/tools.py::
+  tools_node` never retrieves anything at all, so with no real data available the model either
+  echoed the tool's own name back as literal code (the exact error) or **fabricated an entirely
+  invented dataset** and confidently computed over it as if real — a hallucination risk in a
+  different shape than the citation guardrails already cover. Presented 3 fix options to the
+  user rather than picking one; the user chose sharpening the Supervisor's routing prompt (the
+  `ANALYTICS_TOOLS` category text now says "tools" fits only values already stated in the
+  conversation, never a corpus lookup/count) plus an anti-fabrication instruction in
+  `tools/python_analysis.py`'s tool description and field descriptions. Live re-verification,
+  done honestly rather than assumed: **the routing fix works well** — 0 of 5 live attempts with
+  the full Analyst tool set chose `"tools"` for this question, all correctly reasoning it needs
+  retrieval/research first — but **the fill-args safety net, tested in isolation (forcing the
+  route to `"tools"` as if the routing fix had failed), did not reliably prevent fabrication**:
+  2 of 3 attempts still echoed the tool's own name as literal code, the third fabricated a
+  dataset anyway. Also found, live: `agents/nodes/tools.py::_build_choice_schema` structurally
+  cannot express "no tool fits" — one attempt's own reasoning concluded exactly that, verbatim,
+  and was still forced to name a tool. Net assessment stated plainly rather than smoothed over:
+  the fix meaningfully reduces how often this failure mode is reached, does not eliminate the
+  fabrication risk for whatever residual fraction of turns still reach `"tools"` this way — a
+  stronger structural fix (a "no suitable tool" choice-schema option, or `tools_node` refusing
+  outright when `data` is empty) was offered as a next step, not applied unilaterally. Full
+  investigation in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 30. 3 new tests (384 total, up
+  from 381 — the sharpened category text's wording, and `python_analysis`'s tool/field
+  descriptions); `ruff`, `ruff format`, `mypy --strict` all pass clean.
 - **2026-09-06** — Fixed a user-reported bad "research"-route answer ("Run a Python analysis to
   count how many payment incidents happened per month last year?" as an Analyst, answered "no
   payment incidents were recorded for any month last year") by reproducing it live against real

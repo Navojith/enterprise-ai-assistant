@@ -24,6 +24,15 @@ value in the routing schema for a principal holding `Permission.ANALYTICS_TOOLS`
 boundary `python_analysis` does — a Viewer's equivalent question still gets an answer, just
 via `"retrieval"`'s single-hop path instead of a multi-batch investigation.
 
+`_TOOL_CATEGORY_BY_PERMISSION[Permission.ANALYTICS_TOOLS]`'s wording is deliberately strict
+about what "a small Python computation" covers, after live testing found the model routing a
+"Run a Python analysis to count..." style question here rather than to `"research"` — this
+route has no way to retrieve anything, so with no real data in the conversation the model
+either echoed the tool's own name back as literal code or fabricated an entire fictional
+dataset to compute over (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 29's second finding).
+`tools/python_analysis.py`'s own field descriptions are this same fix's second layer, for
+whenever the routing prompt alone still doesn't prevent it.
+
 Memory upkeep — folding old messages into the rolling summary when the thread grows past its
 verbatim budget — runs here rather than as a separate graph node, because the Supervisor already
 runs first on every turn and reads the full message list to make its routing decision; adding a
@@ -127,7 +136,13 @@ _RESEARCH_CLAUSE = (
 # `ToolRegistry.available_to`'s and `tools/registry.py::execute`'s job.
 _TOOL_CATEGORY_BY_PERMISSION: dict[Permission, str] = {
     Permission.SEARCH: "a dedicated internal-document search",
-    Permission.ANALYTICS_TOOLS: "a small Python analysis over data already in the conversation",
+    Permission.ANALYTICS_TOOLS: (
+        "a small Python analysis, but ONLY when the specific values to compute over are "
+        "already stated in this conversation (e.g. numbers the user just typed) — never for "
+        "counting, summarizing, or looking up records from the document corpus, which needs "
+        "retrieval or research instead, since this tool cannot search or retrieve anything "
+        "on its own"
+    ),
     Permission.MCP_TOOLS: "looking up an employee, a service, or an incident record by id or name",
 }
 

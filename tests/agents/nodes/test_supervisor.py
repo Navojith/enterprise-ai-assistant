@@ -61,6 +61,17 @@ class TestAvailableToolCategories:
 
         assert text.count("Python analysis") == 1
 
+    def test_the_analytics_category_warns_it_cannot_retrieve_data(self) -> None:
+        """`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 29's second finding: a "Run a Python
+        analysis to count..." style question routed here despite there being no real data in
+        the conversation to compute over, and the model then fabricated a dataset rather than
+        admit it had nothing to work with. The category text must steer this kind of question
+        toward retrieval/research instead of merely naming "Python analysis" as a capability."""
+        text = _available_tool_categories([_spec(Permission.ANALYTICS_TOOLS)])
+
+        assert "already stated in this conversation" in text
+        assert "cannot search or retrieve" in text
+
 
 def _decision(**overrides: object) -> dict[str, object]:
     """A complete, valid `RoutingDecision` payload, with any field replaceable — pass `None`
