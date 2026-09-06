@@ -525,6 +525,76 @@ cases. `docs/DECISIONS.md` §8's "production-grade code is the bar" extends to s
 specifically: a control that has only ever been exercised by the inputs it was written to catch
 has not yet been tested, only demonstrated.
 
+### 21. Cycle 7's own live verification found LangSmith tracing was silently not tracing the graph
+
+Built exactly as `docs/DECISIONS.md` §2 originally planned — set `LANGSMITH_TRACING=true` /
+`LANGSMITH_API_KEY` and let LangChain's global, environment-variable-gated tracer instrument
+everything automatically, no object to construct or thread through `agents/` — and confirmed
+"working" the same way Cycle 3 did: the key authenticated, `main.py`'s Ollama warm-up call
+appeared in LangSmith. Calling that sufficient without tracing one real conversation turn and
+actually looking for its trace would have shipped an assistant that satisfies ASSESSMENT.md's
+mandatory "trace every conversation... agent transitions... tool calls... retrieval operations"
+requirement in configuration only, not in fact — exactly the class of assumption this project's
+standing rule (`docs/DECISIONS.md` §8, "verify against current documentation... never assume")
+exists to catch, extended here from third-party pricing claims to a third-party library's actual
+runtime behavior.
+
+**What live verification found:** a real chat turn (Supervisor routing, two Response calls, a
+Validator retry) produced **zero** LangSmith runs — confirmed by querying the LangSmith API
+directly after the turn completed and finding only the one, unrelated warm-up trace, not by a
+missing row in a UI that could have been a caching or indexing delay (re-queried several minutes
+later; the count never changed). The env-based global tracer's auto-attach reliably instruments
+a bare `ChatOllama` call made directly in a coroutine, but not the identical call made from
+inside a LangGraph node function: this project's nodes are plain async functions the Pregel
+runtime schedules, not `Runnable`s chained through `RunnableSequence`, and nothing in
+`llm/ollama_provider.py`'s call signatures threads an ambient `RunnableConfig` down to the
+underlying `ChatOllama.ainvoke()`/`.astream()` calls — the same "no separate instrumentation to
+keep in sync" design the module's own docstring described turned out to depend on an ambient
+propagation path that does not reach a graph node's own LLM calls in practice.
+
+**Fix:** stop depending on implicit global state. `observability/langsmith.py::
+build_tracing_callbacks` constructs one explicit `langchain_core.tracers.langchain.
+LangChainTracer` (backed by its own `langsmith.Client`) once at startup, stored on `app.state`;
+`api/v1/chat.py` attaches it via `config["callbacks"]` on every graph invocation, alongside the
+`metadata`/`tags`/`run_name` already set there for run attribution. LangGraph *does* thread an
+explicitly-supplied `config["callbacks"]` through every node's execution — this is the standard,
+documented mechanism for attaching a callback to a compiled graph run, and re-running the exact
+same chat turn after the fix produced a `chat_turn` root run (tagged `role:viewer`, carrying the
+thread id and correlation id in its metadata) with **12 nested child runs** — `guardrail`,
+`supervisor`, `RunnableSequence`, `ChatOllama`, `PydanticOutputParser`, `retrieval`, `response`,
+`validator`, and both conditional-edge functions — all `status: success`. `configure_langsmith`'s
+env-var wiring is kept alongside the explicit callback, both because it costs nothing and because
+it is still what any LangChain code running outside this project's own graph invocation (a REPL,
+a notebook, a future integration) would rely on.
+
+**A second, cosmetic finding from the same pass:** the traced warm-up call itself showed
+`status: error` with `error: GeneratorExit()`, even though the warm-up functionally succeeded
+(`ollama_warmup_succeeded` logged every time). Root cause: `main.py`'s warm-up loop called
+`break` after the first streamed chunk to avoid waiting for a full generation; abandoning
+`ChatOllama.astream()` early throws `GeneratorExit` into it at its suspended `yield`, which its
+LangSmith tracer records as the run failing rather than completing. Harmless to the assistant
+itself, but a red error trace on every single startup is exactly the kind of noise a "trace every
+conversation" requirement should not train an evaluator to shrug off. **Fix:** the warm-up loop
+now drains the stream fully (`async for _ in ...: pass`) instead of breaking early — verified
+live that the same call now traces as a normal `success` run, at the cost of a few extra seconds
+of startup time the warm-up call already existed to hide from the first real request anyway.
+
+**A third finding, in the frontend rather than the backend:** exercising `frontend/api_client.py`
+against a real turn that triggered a Validator retry showed the rendered answer as the rejected
+first draft's text immediately followed by the accepted retry's text, concatenated in the same
+message — because `ANSWER_DELTA` events from *both* Response node executions land on the same
+SSE stream, and naively accumulating every one of them for the whole turn does not distinguish
+"a new draft started" from "the same draft continued." **Fix:** `frontend/app.py`'s streaming
+loop resets its accumulated answer buffer whenever a `NODE_ENTERED` event names `"response"`
+again after the first time — each re-entry is a fresh draft by construction (`docs/ARCHITECTURE.md`'s
+bounded Validator → Response retry loop), so restarting the buffer there, rather than trying to
+detect and strip a stale draft after the fact, is the fix that matches what actually happened.
+
+**Why this generalizes:** the same lesson as trade-off 20's, applied to a different layer —
+"the key authenticates" and "one call traces" are necessary but not sufficient evidence that a
+mandatory requirement is actually met end to end. The fix in both cases was the same discipline:
+trace (or attack) the real path the evaluator will actually exercise, not a proxy for it.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see

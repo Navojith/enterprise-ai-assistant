@@ -158,12 +158,14 @@ enterprise-ai-assistant/
 │   │   ├── citations.py             # verify claims against retrieved chunk IDs
 │   │   └── brand.py                 # commercial-bank persona and safety
 │   └── observability/
-│       ├── langsmith.py             # tracing setup, run metadata
+│       ├── langsmith.py             # explicit LangChainTracer callback + env wiring (Cycle 7)
 │       └── events.py                # typed activity event bus feeding the UI
 │
 ├── mcp_server/                      # mcp.server.mcpserver.MCPServer: employee directory,
 │                                     # service catalog, incidents (Streamable HTTP) — Cycle 4
-├── frontend/                        # Streamlit chat + Agent Activity Panel
+├── frontend/                        # Streamlit chat + Agent Activity Panel — Cycle 7
+│   ├── app.py                       # thin rendering layer: login, chat, activity panel
+│   └── api_client.py                # typed HTTP/SSE client, reuses ActivityEvent from backend
 ├── data/seed/                       # ~60 generated enterprise documents
 ├── scripts/                         # ingest, seed generation, admin utilities
 ├── tests/
@@ -217,7 +219,8 @@ enterprise-ai-assistant/
     memory update, validation result) are emitted over SSE alongside answer tokens, driving the
     Agent Activity Panel.
 12. **Tracing** — the whole run, including agent transitions, tool calls and retrieval operations,
-    is recorded to LangSmith.
+    is recorded to LangSmith via an explicit tracer callback attached to the graph invocation
+    (`docs/DECISIONS.md` §11), not the implicit global env-based tracer alone.
 
 ---
 
@@ -289,8 +292,16 @@ instead of tools: derived from the principal's role, never from anything the mod
 
 ### Observability — 10%
 
-LangSmith traces conversations, agent transitions, tool calls and retrieval operations. Structured
-JSON logs carry correlation IDs that tie backend logs to trace runs.
+LangSmith traces conversations, agent transitions, tool calls and retrieval operations, via an
+explicit `LangChainTracer` attached as `config["callbacks"]` on every graph invocation
+(`observability/langsmith.py::build_tracing_callbacks`, `docs/DECISIONS.md` §11) — live
+verification found that env-var-only global tracing does not reach a call made from inside a
+LangGraph node, so tracing is wired explicitly rather than left to that implicit mechanism.
+Every chat turn becomes one `chat_turn` root run, tagged with the caller's role and carrying the
+thread id and correlation id in its metadata, with the Guardrail, Supervisor, Retrieval/Tools/
+Research and Response/Validator calls nested underneath it as child runs — a reader can go from
+a backend log line's correlation id straight to the matching trace. Structured JSON logs carry
+those same correlation IDs.
 
 ### Async engineering — 5%
 

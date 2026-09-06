@@ -109,7 +109,10 @@ def test_a_viewer_can_open_a_chat_stream() -> None:
     assert "event: node_entered" in response.text
     assert "event: answer_delta" in response.text
     assert "event: done" in response.text
-    assert graph.received_config == {"configurable": {"thread_id": "t1"}}
+    assert graph.received_config is not None
+    assert graph.received_config["configurable"] == {"thread_id": "t1"}
+    assert graph.received_config["metadata"]["principal_role"] == "viewer"
+    assert graph.received_config["tags"] == ["role:viewer"]
 
 
 def test_the_thread_id_and_principal_are_passed_into_the_graph() -> None:
@@ -123,7 +126,10 @@ def test_the_thread_id_and_principal_are_passed_into_the_graph() -> None:
         headers={"Authorization": f"Bearer {token}"},
     )
 
-    assert graph.received_config == {"configurable": {"thread_id": "thread-42"}}
+    assert graph.received_config is not None
+    assert graph.received_config["configurable"] == {"thread_id": "thread-42"}
+    assert graph.received_config["metadata"]["thread_id"] == "thread-42"
+    assert graph.received_config["metadata"]["principal_username"] == "analyst"
 
 
 def test_an_unavailable_graph_returns_a_graceful_503() -> None:

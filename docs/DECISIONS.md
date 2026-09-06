@@ -270,3 +270,86 @@ Agent Activity Panel, and the assessment explicitly wants the evaluator able to 
 decision, not just receive an HTTP error for it. A block is a raised `GuardrailViolationError`,
 reusing `api/v1/chat.py`'s existing mid-stream `AppError` handling rather than adding new
 plumbing for a new failure shape.
+
+---
+
+## 11. LangSmith tracing: an explicit callback, not env-var-only global tracing
+
+The obvious implementation — set `LANGSMITH_TRACING=true` / `LANGSMITH_API_KEY` and rely on
+LangChain's global, environment-variable-gated tracer to instrument every LLM call automatically
+— is what Cycle 3 assumed and what Cycle 7 built first (`observability/langsmith.py::
+configure_langsmith`). Live verification (not a passing test suite — 334 tests stayed green
+throughout) showed it does not trace a single call made from inside a LangGraph node: a real
+chat turn produced zero LangSmith runs, confirmed by querying the LangSmith API directly, even
+though the identical global configuration correctly traced a bare `ChatOllama` call made outside
+the graph (`main.py`'s own Ollama warm-up). `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 21 has
+the full investigation.
+
+**The decision:** attach tracing explicitly rather than keep debugging why the implicit path
+doesn't reach a node's calls. `observability/langsmith.py::build_tracing_callbacks` constructs
+one `LangChainTracer` (backed by its own `langsmith.Client`) once at startup, stored on
+`app.state`; `api/v1/chat.py` passes it as `config["callbacks"]` on every graph invocation,
+alongside `metadata`/`tags`/`run_name` for run attribution (thread id, correlation id, principal
+username and role — role for filtering a trace explorer by, never for authorization itself, per
+§6). LangGraph threads an explicitly-supplied `config["callbacks"]` through every node's
+execution — the standard, documented mechanism for attaching a callback to a compiled graph run
+— and this is what actually produced a nested trace tree (one `chat_turn` root run with 12 child
+runs: guardrail, supervisor, retrieval, response, validator, both LLM calls, both conditional
+edges) in live verification.
+
+**`configure_langsmith`'s env-var wiring is kept, not removed**, for two reasons: it costs
+nothing to leave in place, and it is still what any LangChain code running outside this
+project's own graph invocation — a REPL, a notebook, a future integration that doesn't know
+about `app.state.langsmith_callbacks` — would rely on to get traced at all.
+
+**Why this matters beyond one bug fix:** it is the same lesson as §10's classifier-escalation
+reasoning and trade-off 20's security pass, applied to observability instead of security or
+cost — a component "working" in isolation (the key authenticates, one call traces) is not
+evidence that a mandatory requirement ("trace every conversation") is met on the actual path an
+evaluator will exercise. The fix was to verify that specific path directly, not to trust that a
+generically-correct configuration generalizes to it.
+
+---
+
+## 12. Memory design: two mechanisms, two different jobs
+
+ASSESSMENT.md asks for conversational memory that maintains "user context, previous questions,
+and relevant historical interactions" and "survive[s] multiple turns during a session," and asks
+for the design to be explained. Two separate, independently-testable mechanisms answer that,
+each doing a job the other cannot:
+
+**1. Turn-to-turn persistence — the `AsyncPostgresSaver` checkpointer (Cycle 3).** Every graph
+invocation is keyed by the caller's own `thread_id` (`api/v1/chat.py`); LangGraph's checkpointer
+resumes that thread's full prior `AgentState` — including every message — with no application
+code re-supplying it. This is what makes "memory survives multiple turns" true at all: verified
+live by resuming the same `thread_id` across two separate HTTP requests and confirming the
+second turn's prompt to the model already contained the first turn's exchange. Choosing Postgres
+over an in-memory checkpointer (LangGraph ships both) was deliberate: an in-memory checkpointer
+loses every conversation on a backend restart, which is a real failure mode during a multi-hour
+development or demo session, not a hypothetical one — the same "durable over convenient" bias as
+using Postgres for the rate-limit bucket and the rerank budget counter rather than process
+memory.
+
+**2. Context-window bounding — rolling-summary memory (`memory/summarizer.py`,
+`memory/session.py`).** The checkpointer alone would let a long thread's raw message list grow
+without bound, which a 4B model's limited context window (`docs/DECISIONS.md` §3) cannot
+absorb forever. Once a thread's verbatim message count exceeds `memory_max_verbatim_messages`,
+`summarize_oldest` folds the oldest `memory_summarize_batch_size` messages into a single rolling
+summary string via one schema-constrained LLM call, then drops those exact messages from state
+via LangGraph's documented `RemoveMessage` mechanism. `build_context_messages` is the one place
+that assembles `(system prompt, rolling summary, recent verbatim messages)` into what the model
+actually sees, so the Supervisor and Response nodes cannot each re-derive "how much history to
+include" differently. `needs_summarization` is a pure predicate split from the LLM-calling
+`summarize_oldest`, specifically so the trigger boundary (`exactly at the threshold`, `one
+below`, `one above`) is a plain, fast unit test rather than something that can only be checked
+by running a real summarization call.
+
+**What this buys, and what it costs:** a thread can run indefinitely without ever exceeding the
+model's context window, and recent exchanges stay available verbatim for a follow-up question
+that depends on exact wording (a policy quote, a number). The cost is that anything folded into
+the summary is now paraphrased, not verbatim — a follow-up asking about the *exact phrasing* of
+something from many turns ago will not get it back. This is an accepted trade-off, not an
+oversight: `docs/DECISIONS.md` §2 already scopes long-term memory (a persistent, cross-session
+store) out as a bonus item not built, and the two mechanisms above are explicitly *session*
+memory — "session" meaning "this `thread_id`," not "this browser session" or "this user across
+every conversation they've ever had" (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` assumption 3).

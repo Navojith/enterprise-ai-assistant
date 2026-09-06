@@ -7,7 +7,10 @@ outside the model and full execution tracing.
 
 Built for the AI Lead Technical Assessment (`ASSESSMENT.md`).
 
-> **Status: in development.** See [`docs/PROGRESS.md`](docs/PROGRESS.md) for what is built so far.
+> **Status: all 8 delivery cycles built and live-verified.** See [`docs/PROGRESS.md`](docs/PROGRESS.md)
+> for exactly what was verified, and [`docs/ASSUMPTIONS_AND_TRADEOFFS.md`](docs/ASSUMPTIONS_AND_TRADEOFFS.md)
+> for real findings live verification surfaced along the way. Outstanding: recording the demo
+> video and publishing the repository publicly (`ASSESSMENT.md`'s deliverables).
 
 ---
 

@@ -106,14 +106,46 @@ a real, correctly-cited answer; and a whitespace-only message was rejected with 
 before the graph ever ran. 47 new tests (310 total); `ruff`, `ruff format`, `mypy --strict` all
 pass clean.
 
-**Next action:** start **Cycle 7 — frontend, observability, docs** (Streamlit chat UI with the
-Agent Activity Panel consuming SSE, wiring `observability/langsmith.py`, and finishing
-`README.md` / the architecture diagram / `docs/ASSUMPTIONS_AND_TRADEOFFS.md`). No external
-prerequisites are blocking Cycle 7. **Deferred, not blocking:** re-confirm live, through the
-Streamlit UI once it exists, that a Viewer's identical spec-example research question still
-routes to `"retrieval"` (already confirmed twice via curl — Cycle 5's own live verification and
-again during Cycle 6 — see the session log) — a nice-to-have the user asked for, not a reason to
-reorder anything.
+Cycle 7 — frontend, observability, docs — is built and verified live end to end against real
+Ollama, Pinecone, Postgres, and the MCP server, all four running together: a real Streamlit chat
+UI (`frontend/app.py` + `frontend/api_client.py`) with multi-turn conversation, streaming
+answers, one-click demo-role login, and an Agent Activity Panel rendering the exact same
+`ActivityEvent`s the graph emits (imported from `backend.app.observability.events`, not a
+hand-maintained duplicate); and `observability/langsmith.py` wiring real LangSmith tracing.
+Live verification of the tracing work specifically — not just a passing test suite, which
+stayed green throughout — found that the originally-planned env-var-only global tracing (what
+Cycle 3 had assumed and Cycle 7 built first) produces **zero** LangSmith runs for any LLM call
+made from inside a LangGraph node, confirmed by querying the LangSmith API directly after a real
+chat turn and finding nothing, even though the identical configuration correctly traced a bare
+`ChatOllama` call made outside the graph. Fixed by attaching an explicit `LangChainTracer` as
+`config["callbacks"]` on every graph invocation (`docs/DECISIONS.md` §11) — re-verified live
+that this produces a `chat_turn` root run with 12 nested child runs (guardrail, supervisor,
+retrieval, response, validator, both LLM calls, both conditional edges), all `status: success`.
+Two further real findings from the same verification pass, both fixed and documented in
+`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 21: a cosmetic one, where `main.py`'s Ollama
+warm-up call showed a red `status: error` trace on every startup because breaking out of
+`ChatOllama.astream()` early throws `GeneratorExit` into it (fixed by draining the stream fully
+instead of breaking after the first chunk); and a frontend-side one, where a Validator retry's
+two Response executions had their streamed answer text concatenated into one message instead of
+the retry replacing the rejected draft (fixed by resetting the frontend's answer buffer whenever
+a `NODE_ENTERED` event re-enters `"response"`). `docs/DECISIONS.md` §12 consolidates this
+project's memory design rationale (the checkpointer's turn-to-turn persistence and the
+rolling-summary's context-window bounding are two separate mechanisms doing two different jobs)
+into one place, since ASSESSMENT.md asks for that rationale to be documented and it had
+previously only lived across several module docstrings. 18 new tests (334 total, up from 316 —
+`observability/langsmith.py`'s env-var wiring and connectivity check, and
+`frontend/api_client.py`'s SSE parsing and error-mapping logic); `ruff`, `ruff format`,
+`mypy --strict` all pass clean.
+
+**Next action:** all 8 delivery cycles are built and live-verified. What remains is entirely
+external to the codebase: record the 45-minute demo video (showing LangSmith traces — the
+tracing fix above means there is now something real to show — and the assumptions/trade-offs
+discussion `ASSESSMENT.md` asks for) within LangSmith's 14-day trace retention window, and
+publish the repository publicly. **Deferred, not blocking:** re-confirm live, through the
+Streamlit UI now that it exists, that a Viewer's identical spec-example research question still
+routes to `"retrieval"` (already confirmed three times via curl — Cycle 5's own live
+verification, again during Cycle 6, and the RBAC behavior is unchanged by Cycle 7 — see the
+session log) — a nice-to-have the user asked for, not a reason to reorder anything.
 
 ---
 
@@ -142,7 +174,7 @@ These are user-side actions. Full instructions in `docs/SETUP.md`.
 | 4 | Tools and RBAC enforcement | 3h | ✅ done |
 | 5 | RLM research agent | 4h | ✅ done |
 | 6 | Guardrails and validation | 2.5h | ✅ done |
-| 7 | Frontend, observability, docs | 4h | ⬜ pending |
+| 7 | Frontend, observability, docs | 4h | ✅ done |
 
 Legend: ⬜ pending · 🟡 in progress · ✅ done
 
@@ -387,15 +419,40 @@ since the test environment has no `PINECONE_API_KEY`.
       passed the new citation/brand checks cleanly; a whitespace-only message rejected with a
       clean 422 before the graph ran at all
 
-### Cycle 7 — Frontend, observability, docs ⬜
+### Cycle 7 — Frontend, observability, docs ✅
 
-- [ ] Streamlit chat UI, multi-turn, streaming
-- [ ] Agent Activity Panel consuming SSE events
-- [ ] LangSmith tracing wired with run metadata
-- [ ] `README.md` finalised
-- [ ] Architecture diagram exported
-- [ ] `docs/ASSUMPTIONS_AND_TRADEOFFS.md` completed
-- [ ] Model selection + memory design rationale written
+- [x] Streamlit chat UI, multi-turn, streaming (`frontend/app.py` + `frontend/api_client.py`) —
+      one-click demo-role login, `st.chat_message`/`st.chat_input`, token-by-token streaming into
+      a placeholder, persisted `chat_history` across reruns keyed by a per-conversation
+      `thread_id` the sidebar's "New conversation" button rotates
+- [x] Agent Activity Panel consuming SSE events — renders the exact `ActivityEvent`s the graph
+      emits (imported from `backend.app.observability.events`, not a hand-maintained duplicate
+      schema), grouped by turn, with a live "active node" indicator updated on every
+      `NODE_ENTERED` event
+- [x] LangSmith tracing wired with run metadata — `observability/langsmith.py` +
+      `api/v1/chat.py`; live verification found and fixed a real gap (env-var-only global
+      tracing did not reach graph-node LLM calls at all) rather than assuming the naive
+      implementation worked — see `docs/DECISIONS.md` §11 and trade-off 21
+- [x] `README.md` finalised — status line updated to reflect all 8 cycles built and verified
+- [ ] Architecture diagram — `README.md` and `docs/ARCHITECTURE.md` already carry Mermaid
+      diagrams that render natively on GitHub; whether that satisfies ASSESSMENT.md's separate
+      "Architecture diagram" deliverable line or a standalone exported image is still wanted is
+      an open question for the user, not decided here (see the deliverables checklist below)
+- [x] `docs/ASSUMPTIONS_AND_TRADEOFFS.md` completed — trade-off 21 added for this cycle's own
+      live-verification findings
+- [x] Model selection rationale — already thorough (`docs/DECISIONS.md` §2, §3, §5); memory
+      design rationale newly consolidated into one place, `docs/DECISIONS.md` §12, rather than
+      left scattered across `memory/session.py`/`memory/summarizer.py` docstrings only
+- [x] `tests/observability/test_langsmith.py`, `tests/frontend/test_api_client.py` — 18 new
+      tests (334 total); `ruff`, `ruff format`, `mypy --strict` all pass clean
+- [x] Live end to end against real Ollama/Pinecone/Postgres/MCP: backend startup wiring
+      confirmed (`langsmith_tracing_enabled`, `langsmith_connectivity_verified`,
+      `ollama_warmup_succeeded` all logged); a full chat turn (Viewer role, retrieval route,
+      including a Validator retry) completed and streamed correctly through both the raw SSE
+      protocol and `frontend/api_client.py`'s own typed client; the resulting `chat_turn` trace
+      was confirmed in LangSmith with 12 correctly-nested child runs; the Streamlit app itself
+      was started headless and confirmed to boot and serve without error against the live
+      backend
 
 ---
 
@@ -415,6 +472,46 @@ From `ASSESSMENT.md`. Tracked separately because these are graded independently 
 
 Newest first. One line per meaningful change.
 
+- **2026-09-06** — Built and verified Cycle 7 (frontend, observability, docs) live end to end
+  against real Ollama, Pinecone, Postgres, and the MCP server, all four running together. Built
+  the Streamlit chat UI (`frontend/app.py` + `frontend/api_client.py`) and
+  `observability/langsmith.py`'s tracing wiring, then verified each live rather than trusting a
+  green test suite — which stayed at 334 passing throughout — to mean the mandatory "trace every
+  conversation" requirement was actually met. It wasn't, at first: the originally-planned
+  env-var-only global LangSmith tracing (`LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY`, the
+  design Cycle 3 had already assumed worked) produced a real trace for `main.py`'s Ollama
+  warm-up call made directly in a coroutine, but **zero** traces for any of the several LLM
+  calls a real chat turn's graph nodes make — confirmed by querying the LangSmith API directly
+  after the turn completed and finding nothing, re-checked several minutes later to rule out a
+  batching delay rather than a real gap. Root-caused to LangGraph nodes being plain async
+  functions the Pregel runtime schedules, not `Runnable`s chained through `RunnableSequence`, so
+  nothing threads an ambient `RunnableConfig` down to `llm/ollama_provider.py`'s calls for the
+  global tracer's auto-attach to find. Fixed by attaching an explicit `LangChainTracer` as
+  `config["callbacks"]` on every graph invocation (`docs/DECISIONS.md` §11) — re-verified live
+  that the identical chat turn now produces a `chat_turn` root run with 12 correctly-nested
+  child runs (guardrail, supervisor, retrieval, response, validator, both LLM calls, both
+  conditional edges), all `status: success`. The same investigation found and fixed two smaller
+  real issues: the traced Ollama warm-up call itself showed a cosmetic `status: error` on every
+  startup (`break`-ing out of `ChatOllama.astream()` early throws `GeneratorExit` into it at its
+  suspended `yield`, which its tracer records as a failure) — fixed by draining the warm-up
+  stream fully instead; and a Validator retry's two Response executions had their streamed
+  answer text concatenated into one message in the frontend instead of the retry replacing the
+  rejected draft — fixed by resetting `frontend/app.py`'s answer buffer whenever a
+  `NODE_ENTERED` event re-enters `"response"`. All three findings, plus the live-verified
+  investigation narrative, are recorded in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 21.
+  Also consolidated this project's memory design rationale into a new `docs/DECISIONS.md` §12,
+  since ASSESSMENT.md asks for it to be documented and it had previously only lived scattered
+  across `memory/session.py`/`memory/summarizer.py` docstrings. Live verification covered the
+  whole path: backend startup logs confirmed `langsmith_tracing_enabled`,
+  `langsmith_connectivity_verified`, and (post-fix) a clean `ollama_warmup_succeeded`; a full
+  chat turn streamed correctly through both the raw SSE protocol and `frontend/api_client.py`'s
+  own typed client (login, event parsing, answer accumulation); and the Streamlit app itself was
+  started headless against the live backend and confirmed to boot and serve without error. 18
+  new tests (334 total); `ruff`, `ruff format`, `mypy --strict` all pass clean. One local-
+  environment change made in the course of this verification and left in place rather than
+  reverted: `.env`'s `LANGSMITH_TRACING` is now `true` (was `false`) — tracing needs to be on for
+  the demo video's LangSmith-traces requirement regardless, and the Developer tier's 5k
+  traces/month budget comfortably absorbs ordinary development use.
 - **2026-09-06** — Ran a dedicated live security-testing pass across the whole stack (auth,
   RBAC, rate limiting, injection guardrails, the RLM sandbox), at the user's request to test the
   security side further and confirm results match expectations. Auth edge cases (wrong

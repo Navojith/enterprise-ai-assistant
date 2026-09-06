@@ -41,6 +41,11 @@ from backend.app.core.logging import (
 )
 from backend.app.llm.chain import FallbackChain
 from backend.app.llm.ollama_provider import OllamaProvider
+from backend.app.observability.langsmith import (
+    build_tracing_callbacks,
+    configure_langsmith,
+    verify_langsmith_connectivity,
+)
 from backend.app.retrieval.pinecone_store import PineconeStore, get_pinecone_store
 from backend.app.tools.factory import build_default_registry
 from backend.app.tools.mcp_client import MCPClient
@@ -55,6 +60,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings)
     logger.info("startup", environment=settings.environment, ollama_model=settings.ollama_model)
+
+    # Set before anything else that might emit a trace (the Ollama warm-up call below included),
+    # so tracing coverage matches ASSESSMENT.md's "trace every conversation" requirement from the
+    # first LLM call this process ever makes, not just from the first user turn onward. Never
+    # fatal — see `observability/langsmith.py`'s own docstring for why a bad key degrades to a
+    # warning rather than blocking startup.
+    configure_langsmith(settings)
+    if settings.langsmith_tracing:
+        await verify_langsmith_connectivity(settings)
+    # `api/v1/chat.py` attaches this to every graph invocation's `config["callbacks"]` — see
+    # `observability/langsmith.py`'s module docstring for why the env-var configuration above is
+    # not, by itself, enough to trace a single call a graph node makes.
+    app.state.langsmith_callbacks = build_tracing_callbacks(settings)
 
     # Best-effort: a Postgres blip here shouldn't stop the process from serving liveness/
     # readiness (which will itself report the database as unreachable) — see the retry-free
@@ -103,9 +121,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         # Loads the model into VRAM before the first real request — see
         # docs/ASSUMPTIONS_AND_TRADEOFFS.md trade-off 13 on why a cold first call is otherwise
-        # dramatically slower than every call after it.
+        # dramatically slower than every call after it. Drained fully, not `break`-ed after the
+        # first chunk: abandoning `ChatOllama.astream()` early throws `GeneratorExit` into it at
+        # its suspended `yield`, which its LangSmith tracer records as the run *failing* rather
+        # than completing — cosmetic (the warm-up itself still succeeds either way), but a red
+        # error trace on every single startup is exactly the kind of thing a "trace every
+        # conversation" requirement should not train an evaluator to shrug off. Verified live:
+        # this call now shows as a normal `success` run.
         async for _ in llm_provider.astream([HumanMessage(content="Reply with OK.")]):
-            break
+            pass
         logger.info("ollama_warmup_succeeded")
     except Exception:
         logger.warning("ollama_warmup_failed", exc_info=True)

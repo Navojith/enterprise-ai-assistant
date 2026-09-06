@@ -62,7 +62,30 @@ async def _stream_turn(
 ) -> AsyncIterator[str]:
     graph = request.app.state.graph
     graph_context: GraphContext = request.app.state.graph_context
-    config = {"configurable": {"thread_id": payload.thread_id}}
+    correlation_id = get_correlation_id()
+    config = {
+        "configurable": {"thread_id": payload.thread_id},
+        # LangSmith run metadata (ASSESSMENT.md's "trace every conversation" requirement) —
+        # `metadata`/`tags` are the standard `RunnableConfig` keys LangGraph forwards onto every
+        # run in the trace tree, and `run_name` is what names the top-level run in the LangSmith
+        # UI instead of a bare "LangGraph". `correlation_id` is what a reader joins a trace back
+        # to this request's structured logs by (`core/logging.py`); `role` is never authorization
+        # itself (docs/DECISIONS.md §6) — it is here purely so a trace explorer can filter by it.
+        "metadata": {
+            "correlation_id": correlation_id,
+            "thread_id": payload.thread_id,
+            "principal_username": principal.username,
+            "principal_role": principal.role.value,
+        },
+        "tags": [f"role:{principal.role.value}"],
+        "run_name": "chat_turn",
+        # Explicit, not the env-var-only global tracer — `observability/langsmith.py`'s module
+        # docstring has the live-verified reason: the global tracer alone traced a bare `ChatOllama`
+        # call but produced zero traces for any LLM call a graph node made. `getattr` with a `[]`
+        # default so a bare `FastAPI()` test app that never ran the real lifespan (`tests/api/
+        # test_chat.py`) doesn't need to stub this attribute just to exercise the endpoint.
+        "callbacks": getattr(request.app.state, "langsmith_callbacks", []),
+    }
     input_state = {
         "messages": [HumanMessage(content=payload.message)],
         "principal_username": principal.username,
