@@ -1,8 +1,10 @@
 """Curated Python API injected into `rlm/sandbox.py` for the RLM planner's generated search
 plans: `search`, `filter`, `batch`, `sub_agent`, `sub_agents`, `aggregate` — the five functions
-`docs/ARCHITECTURE.md` and `docs/DELIVERY_PLAN.md` name explicitly. Every function here operates
-on plain JSON-safe `dict`s, never `RetrievedChunk` model instances or anything else with
-attributes to walk — this keeps the sandbox's data surface exactly as constrained as
+`docs/ARCHITECTURE.md` and `docs/DELIVERY_PLAN.md` name explicitly — plus `group_by_document`,
+added after live testing found `batch`'s fixed-size, order-agnostic splitting could separate one
+document's sections across two batches (see `group_by_document`'s own docstring). Every function
+here operates on plain JSON-safe `dict`s, never `RetrievedChunk` model instances or anything else
+with attributes to walk — this keeps the sandbox's data surface exactly as constrained as
 `python_analysis`'s `data: Any` contract, just populated by `search` instead of a caller-supplied
 argument.
 
@@ -74,6 +76,7 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from backend.app.core.config import Settings
 from backend.app.core.errors import AppError
 from backend.app.core.security.rbac import Principal
 from backend.app.guardrails.injection import UNTRUSTED_CONTENT_INSTRUCTION, frame_untrusted_content
@@ -82,6 +85,7 @@ from backend.app.observability.events import ActivityEvent, ActivityEventType
 from backend.app.retrieval.hybrid import hybrid_search, merge_prioritizing_scoped
 from backend.app.retrieval.models import DEPARTMENTS, DocumentType
 from backend.app.retrieval.pinecone_store import PineconeStore
+from backend.app.retrieval.reranker import rerank_chunks
 
 logger = structlog.get_logger(__name__)
 
@@ -93,17 +97,34 @@ class SubAgentFinding(BaseModel):
         description="One sentence on what this batch's evidence shows, written before the finding."
     )
     finding: str = Field(
-        description="A concise answer to the sub-question, grounded only in the evidence given."
+        description=(
+            "A grounded answer to the sub-question, using only the evidence given. If the "
+            "evidence describes multiple distinct incidents, dates, or events, identify each "
+            "one separately (with its date and root cause) rather than merging them into one "
+            "generic statement, and cite each fact using the bracketed [Title] it appeared "
+            "under."
+        )
     )
 
 
 class AggregatedFindings(BaseModel):
     """Schema for `aggregate`'s one LLM call combining every sub-agent finding."""
 
-    summary: str = Field(description="A synthesized answer combining every finding below.")
+    summary: str = Field(
+        description=(
+            "A synthesized answer combining every finding below. Preserve every distinct "
+            "incident, date, and root cause the findings name and keep their citations intact "
+            "— do not merge or average them into vague generalities, and never state a count "
+            "or fact that is not actually present in the findings."
+        )
+    )
     recurring_themes: list[str] = Field(
         default_factory=list,
-        description="Distinct themes or root causes that recur across two or more findings, if any.",
+        description=(
+            "Distinct themes or root causes explicitly named in two or more of the findings "
+            "below — never a theme invented or inferred beyond what the findings actually "
+            "state."
+        ),
     )
 
 
@@ -119,6 +140,7 @@ class RLMBudget:
     max_depth: int
     max_total_sub_agent_calls: int
     sub_agent_calls_made: int = 0
+    reranked: bool = False
 
     def try_reserve_sub_agent_call(self) -> bool:
         """Reserve one call against the whole-tree budget, returning `False` once exhausted
@@ -129,6 +151,23 @@ class RLMBudget:
         if self.sub_agent_calls_made >= self.max_total_sub_agent_calls:
             return False
         self.sub_agent_calls_made += 1
+        return True
+
+    def try_reserve_rerank(self) -> bool:
+        """Reserve this research turn's one allowed rerank call. `CLAUDE.md`'s architecture
+        invariant is explicit: "Reranking runs at most once per user turn, never per RLM
+        sub-agent — the free tier allows only 500 requests per month." Sharing one `RLMBudget`
+        by reference across the whole recursive tree (exactly like `sub_agent_calls_made`) is
+        what makes this a true once-per-turn cap: the first `search()` call anywhere in the
+        tree — ordinarily the top-level plan's own, highest-value search — gets reranked, and
+        every subsequent call, including a recursive sub-agent's own `search()`, reuses the
+        plain RRF-fused order instead. `rlm/executor.py::_run_plan_at_depth` hands a depth-0
+        fallback attempt a *fresh* `RLMBudget`, so a failed generated plan's rerank spend (if
+        any) does not deny the fallback its own one call — the same reasoning already applied
+        to `sub_agent_calls_made` there."""
+        if self.reranked:
+            return False
+        self.reranked = True
         return True
 
 
@@ -153,6 +192,7 @@ class RLMContext:
     role: str
     store: PineconeStore | None
     llm: LLMProvider
+    settings: Settings
     budget: RLMBudget
     depth: int
     max_concurrent_sub_agents: int
@@ -263,6 +303,27 @@ def build_search(context: RLMContext) -> Callable[..., list[dict[str, Any]]]:
             # Pinecone entirely down) empties the result rather than failing the whole plan.
             logger.warning("rlm_search_degraded", query=query, error=str(exc))
             return []
+
+        # Parity with `agents/nodes/retrieval.py`, gated by `RLMBudget.try_reserve_rerank` —
+        # see that method's docstring for the once-per-turn invariant this enforces. Before this
+        # fix, every RLM search ran on the raw RRF-fused order with no cross-encoder pass at
+        # all, which was a real, measured quality gap against the plain retrieval path (a
+        # research-route answer to the spec's own example question came back visibly worse than
+        # a single-hop retrieval answer to the identical question).
+        #
+        # `rerank_attempted` records whether this call *spent* the turn's one reservation, not
+        # whether reranking actually reordered anything — `rerank_chunks` itself degrades to a
+        # no-op (and logs its own `rerank_skipped`) whenever `settings.rerank_enabled` is off,
+        # the monthly budget is exhausted, or the call fails. Naming this field `reranked` read
+        # as a stronger claim than it was: live-verified confusing, since this project's own
+        # `.env` runs with `RERANK_ENABLED=false` day to day, so every `rlm_search_completed`
+        # line during ordinary local testing showed `reranked=True` despite `rerank_chunks`
+        # having just no-op'd one line above it in the same log stream.
+        rerank_attempted = context.budget.try_reserve_rerank()
+        if rerank_attempted:
+            chunks = await rerank_chunks(
+                context.store, query=query, chunks=chunks, settings=context.settings
+            )
         logger.info(
             "rlm_search_completed",
             query=query,
@@ -271,6 +332,7 @@ def build_search(context: RLMContext) -> Callable[..., list[dict[str, Any]]]:
             scoped_count=scoped_count,
             unscoped_count=unscoped_count,
             result_count=len(chunks),
+            rerank_attempted=rerank_attempted,
         )
         return [_chunk_to_dict(chunk) for chunk in chunks]
 
@@ -337,6 +399,47 @@ def batch_chunks(chunks: list[dict[str, Any]], size: int) -> list[list[dict[str,
     return [chunks[i : i + step] for i in range(0, len(chunks), step)]
 
 
+def group_by_document(
+    chunks: list[dict[str, Any]], max_batch_size: int = 8
+) -> list[list[dict[str, Any]]]:
+    """Group chunks into batches that never split one document's sections across two
+    batches, packing whole documents together up to `max_batch_size` per batch.
+
+    Preferred over `batch()` for a broad question spanning many documents: a fixed-size,
+    order-agnostic `batch()` call can (and, live-verified, did) split a single incident's
+    Root Cause section into one batch and its Summary/Timeline into another, so no single
+    sub-agent ever sees the full incident together — `_direct_finding`'s leaf analysis then
+    has no way to answer "what was the root cause?" for that incident correctly, and reported
+    it as unspecified even though the corpus stated it plainly, just in a different batch.
+
+    Document order is preserved by each document's first appearance in `chunks` — already
+    relevance-ranked by `search` (and, since this fix, reranked) — so if the sub-agent budget
+    runs out before every batch is analyzed, the highest-ranked documents are the ones that
+    ran. A document larger than `max_batch_size` still gets its own single batch rather than
+    being split; respecting document boundaries takes priority over the size target.
+    """
+    order: list[str] = []
+    by_document: dict[str, list[dict[str, Any]]] = {}
+    for chunk in chunks:
+        document_id = str(chunk.get("document_id", ""))
+        if document_id not in by_document:
+            order.append(document_id)
+            by_document[document_id] = []
+        by_document[document_id].append(chunk)
+
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for document_id in order:
+        document_chunks = by_document[document_id]
+        if current and len(current) + len(document_chunks) > max_batch_size:
+            batches.append(current)
+            current = []
+        current.extend(document_chunks)
+    if current:
+        batches.append(current)
+    return batches
+
+
 def _format_evidence(chunks: list[dict[str, Any]]) -> str:
     if not chunks:
         return "(no evidence in this batch)"
@@ -355,8 +458,11 @@ async def _direct_finding(*, question: str, chunks: list[dict[str, Any]], llm: L
         SystemMessage(
             content=(
                 "You are a sub-agent analyzing one batch of internal documents for a larger "
-                "research task. Answer the question below using only the evidence given. "
-                f"{UNTRUSTED_CONTENT_INSTRUCTION}"
+                "research task. Answer the question below using only the evidence given. If "
+                "the evidence covers multiple distinct incidents or events, list each one "
+                "separately with its date and root cause rather than collapsing them into one "
+                "vague statement, and cite each fact's [Title] exactly as it appears in the "
+                f"evidence. {UNTRUSTED_CONTENT_INSTRUCTION}"
             )
         ),
         HumanMessage(
@@ -401,6 +507,7 @@ async def _one_sub_agent_call(
         role=context.role,
         store=context.store,
         llm=context.llm,
+        settings=context.settings,
         budget=context.budget,
         depth=context.depth + 1,
         max_concurrent_sub_agents=context.max_concurrent_sub_agents,
@@ -460,7 +567,13 @@ def build_aggregate(context: RLMContext) -> Callable[[list[str], str], dict[str,
         findings_text = "\n".join(f"- {finding}" for finding in findings) or "(no findings)"
         messages = [
             SystemMessage(
-                content="Combine the sub-agent findings below into one synthesized answer."
+                content=(
+                    "Combine the sub-agent findings below into one synthesized answer. "
+                    "Preserve every distinct incident, date, and root cause the findings name, "
+                    "and keep their citations intact — do not drop, merge, or average them "
+                    "into vague generalities, and do not state a count or fact the findings "
+                    "below do not actually contain."
+                )
             ),
             HumanMessage(content=f"Original question: {question}\n\nFindings:\n{findings_text}"),
         ]
@@ -488,6 +601,7 @@ def build_rlm_globals(context: RLMContext) -> dict[str, Any]:
         "search": build_search(context),
         "filter": filter_chunks,
         "batch": batch_chunks,
+        "group_by_document": group_by_document,
         "sub_agent": build_sub_agent(context),
         "sub_agents": build_sub_agents(context),
         "aggregate": build_aggregate(context),

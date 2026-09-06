@@ -57,6 +57,11 @@ _SYSTEM_PROMPT = (
     f"{_VALID_DEPARTMENTS}. Any other value matches nothing — do not invent one.\n"
     "- batch(chunks: list[dict], size: int) -> list[list[dict]]: split into fixed-size "
     "batches.\n"
+    "- group_by_document(chunks: list[dict], max_batch_size: int = 8) -> list[list[dict]]: "
+    "group into batches that never split one document's sections across two batches. "
+    "Prefer this over batch() whenever the question spans many documents (e.g. summarizing "
+    "many incidents), so a sub-agent always sees a full document's evidence together, not "
+    "a fragment of one.\n"
     "- sub_agent(question: str, chunks: list[dict]) -> str: recursively analyze ONE batch "
     "and return a finding.\n"
     "- sub_agents(question: str, batches: list[list[dict]]) -> list[str]: analyze MULTIPLE "
@@ -85,15 +90,23 @@ class ResearchPlan(BaseModel):
 
 
 def deterministic_fallback_plan(question: str) -> str:
-    """Fixed, hand-written fallback: search once, batch generously, analyze concurrently,
+    """Fixed, hand-written fallback: search once, batch by document, analyze concurrently,
     aggregate. Never fails the AST allowlist — it is not model output — and is the floor this
     codebase's error-handling philosophy asks for everywhere else: a degraded answer, never a
     hard failure, when the fast path (a 4B model writing correct Python on the first or second
     try) does not pan out.
+
+    Batches by `group_by_document` rather than fixed-size `batch` — live-verified this was a
+    real, not theoretical, quality gap: fixed-size batching split individual incidents' Root
+    Cause and Summary sections across different batches often enough that a research turn on
+    the spec's own example question ("summarize outage reports... identify recurring root
+    causes") produced a visibly worse, partly fabricated answer than a single-hop retrieval
+    turn on the identical question. `rlm/api.py::group_by_document`'s own docstring has the
+    full mechanism.
     """
     return (
         "chunks = search(question, top_k=20)\n"
-        "batches = batch(chunks, 5)\n"
+        "batches = group_by_document(chunks)\n"
         "findings = sub_agents(question, batches)\n"
         "result = aggregate(findings, question)\n"
     )

@@ -197,6 +197,7 @@ async def execute_research(
         role=role,
         store=store,
         llm=llm,
+        settings=settings,
         budget=budget,
         depth=0,
         max_concurrent_sub_agents=settings.rlm_max_concurrent_sub_agents,

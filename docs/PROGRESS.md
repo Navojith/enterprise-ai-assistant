@@ -492,6 +492,32 @@ mechanism) rather than requiring any new paid service.
 
 Newest first. One line per meaningful change.
 
+- **2026-09-06** — Fixed a real research-vs-retrieval quality gap the user found by comparing the
+  spec's own example question across roles: a Viewer (routed to `"retrieval"`) got a detailed,
+  correctly-cited answer; an Analyst (routed to `"research"`, the higher-privileged route that
+  should never answer *worse*) got a fast-but-vague answer, and on a prior run a slow one with a
+  fabricated incident count and an invented date. Root-caused to three compounding gaps against
+  `agents/nodes/retrieval.py`'s precedent — no reranking on the RLM path at all, `batch()`
+  splitting one incident's sections across different batches so no sub-agent ever saw a whole
+  incident together, and no citation/completeness instruction in the sub-agent or aggregate
+  prompts — full detail in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28. Fixed all three:
+  reranking added to `rlm/api.py::build_search`, gated by a new `RLMBudget.try_reserve_rerank()`
+  so it honors `CLAUDE.md`'s "at most once per user turn, never per RLM sub-agent" invariant
+  regardless of recursive fan-out; a new `group_by_document` (bin-packs whole documents into
+  batches, never splitting one) added to the curated RLM API and the planner's system prompt, and
+  swapped into `deterministic_fallback_plan`; explicit per-incident/citation-preservation wording
+  added to `_direct_finding` and `aggregate`'s prompts and schemas. Live verification (not just
+  the 8 new/updated tests, 368 total up from 360, `ruff`/`ruff format`/`mypy --strict` all clean)
+  found two more things worth recording rather than glossing over: a misleading log field
+  (`reranked=True` was logged even when `rerank_chunks` itself had just no-op'd one line above it,
+  because this project's own `.env` runs `RERANK_ENABLED=false` day to day — renamed to
+  `rerank_attempted` with a comment explaining the distinction), and a new, previously-masked
+  bottleneck (`rlm_max_total_sub_agent_calls`'s default of 4 now under-covers a broad question
+  once batching correctly respects document boundaries, so a research turn can report an honest
+  "no recurring root cause identified" over only a handful of the corpus's real 10–15 payment
+  incidents rather than a comprehensive answer) — left as an open, documented trade-off
+  (`docs/ASSUMPTIONS_AND_TRADEOFFS.md`'s "Known limitations") rather than resolved unilaterally,
+  since raising it trades coverage against more sequential local-model calls per turn.
 - **2026-09-06** — Fixed five separate, sequentially-discovered RLM reliability and correctness
   bugs, starting from a user report that an Analyst got "Research could not be completed:
   Sandbox execution exceeded its 180.0s wall-clock budget" asking the spec's own example

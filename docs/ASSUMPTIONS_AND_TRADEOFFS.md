@@ -1049,6 +1049,84 @@ verification this project has followed throughout, not a tidier story rewritten 
 `filter_chunks`'s defensive value handling (`tests/rlm/test_api.py`), one pinning bug 5's exact
 regression (`tests/rlm/test_executor.py`); `ruff`, `ruff format`, `mypy --strict` all pass clean.
 
+### 28. The `"research"` route's answer quality visibly lagged plain `"retrieval"` on the identical
+question — three real gaps found and fixed, one new bottleneck found and left as an open question
+
+A user comparison, not a bug report, surfaced this: asking the spec's own example question
+("Summarize all outage reports related to payment failures during the last year and identify
+recurring root causes") as both a Viewer and an Analyst returned a detailed, well-cited answer for
+the Viewer (routed to `"retrieval"`) and a fast-but-vague, then slow-but-wrong, answer for the
+Analyst (routed to `"research"`, the route the higher-privileged role should get the *better*
+answer from, not a worse one). Reading `rlm/executor.py`, `rlm/api.py`, and `rlm/planner.py`
+against `agents/nodes/retrieval.py` found three compounding, real gaps, not one:
+
+1. **No reranking on the RLM path.** `agents/nodes/retrieval.py` reranks its fused candidates
+   (`retrieval/reranker.py`); `rlm/api.py::build_search` — every RLM plan's `search()` — never
+   did. Fixed by adding a rerank pass to `build_search`, but gated through a new
+   `RLMBudget.try_reserve_rerank()` so the whole-tree budget (shared by reference, exactly like
+   `sub_agent_calls_made`) allows exactly one rerank call per research turn regardless of how many
+   times a plan or its recursive sub-agents call `search()` — `CLAUDE.md`'s own architecture
+   invariant is explicit that reranking must run "at most once per user turn, never per RLM
+   sub-agent", so the naive per-call version this fix started as would have been a real invariant
+   violation, caught before shipping rather than after.
+2. **`batch()`'s fixed-size, order-agnostic splitting could separate one document's sections
+   across two batches.** Each payment incident is chunked into 4 sections (Summary, Root Cause,
+   Timeline, Remediation — `scripts/generate_seed_corpus.py`); a batch of 5 built from raw search
+   order could easily mix one incident's Root Cause with a different incident's Timeline, so no
+   sub-agent ever saw a whole incident together and `_direct_finding` had no way to answer "what
+   was the root cause?" correctly — this is what produced the live-observed vague, wrong answer
+   (a fabricated incident count and a date not present in the corpus). Fixed with a new
+   `rlm/api.py::group_by_document`, which bin-packs whole documents into batches up to
+   `max_batch_size` without ever splitting one — added to `rlm/planner.py`'s system prompt
+   alongside `batch()`, and swapped into `deterministic_fallback_plan`. Notable live result: on
+   both verification runs, the 4B model's *own generated plan* spontaneously used
+   `group_by_document` after reading the updated prompt — unprompted beyond the prompt text
+   itself, and the first time in this project's history (per this file's own session log) the
+   model produced AST-valid Python on the first attempt at all, let alone code that correctly
+   adopted a function introduced this same session.
+3. **Neither the sub-agent's finding nor the aggregate step had any citation or completeness
+   instruction.** `agents/nodes/response.py` requires bracketed `[Title]` citations per fact;
+   `rlm/api.py::_direct_finding`/`build_aggregate` asked only for a "concise" finding and a
+   "combined" summary — nothing told the model to preserve per-incident dates or root causes
+   rather than compressing them into a vague generality. Fixed by adding explicit instructions to
+   both prompts and both schemas' field descriptions: identify multiple distinct incidents
+   separately, cite each fact's `[Title]`, and never state a count or fact the findings do not
+   actually contain.
+
+All three fixes were verified against a real, running stack (not just the 7 new/updated unit
+tests, `tests/rlm/test_api.py`'s `TestGroupByDocument`/`TestSearchReranking` among them — 368
+total, up from 360, `ruff`/`ruff format`/`mypy --strict` all clean throughout) — and that live
+verification is also where a real logging bug and a real remaining bottleneck were found, both
+worth recording precisely because a less careful pass would have missed them:
+
+- **A misleading log field, found only because `.env` runs with `RERANK_ENABLED=false` day to
+  day.** The first live run logged `rlm_search_completed ... reranked=True` — but one line above
+  it, `rerank_chunks` had already logged `rerank_skipped reason=disabled_in_settings`. The field
+  reflected "this call spent the turn's one rerank reservation," not "chunks were actually
+  reordered," and reading the log line alone (as this session's own draft summary to the user
+  initially did) overclaims what happened — reranking never actually executed in either live
+  verification run, only the budget reservation did. Renamed to `rerank_attempted` with a comment
+  explaining exactly this, rather than leaving a field name that reads as a stronger claim than it
+  is. The rerank fix itself is unaffected — it is correct code, gated correctly, that simply has
+  no observable effect until `RERANK_ENABLED` is turned on (trade-off 4 explains why it defaults
+  off).
+- **A new, previously-masked bottleneck: `Settings.rlm_max_total_sub_agent_calls` (default 4,
+  trade-off 17) now under-covers a broad question once batches respect document boundaries.**
+  Before this fix, a fixed-size `batch()` happened to spread thin across many incidents inside 4
+  calls (inaccurately — see gap 2 above). After this fix, each of those 4 calls correctly analyzes
+  whole documents, but 4 calls covers only a handful of the corpus's real 10–15 payment incidents
+  once `group_by_document` respects boundaries — especially when the model's own generated plan
+  chose a large candidate set (`top_k=100`, seen on both live verification runs, comfortably past
+  what document-correct batching can fit in 4 slots). The remaining incidents are silently
+  skipped (`_one_sub_agent_call`'s existing degrade-not-raise "(skipped: budget already used)"
+  path, trade-off 17), and the model — now correctly instructed not to fabricate — reported "no
+  recurring root cause identified" rather than inventing one. This is a real trade-off, not a
+  regression to silently patch: raising the budget buys more coverage at the cost of more
+  sequential local-model calls (trade-off 17's whole reason for defaulting low in the first
+  place). Left as an open decision for the user rather than resolved unilaterally — this file's
+  "Known limitations" section below records it as unresolved rather than implying the fix above
+  made the research route reliably comprehensive.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see
@@ -1072,3 +1150,10 @@ regression (`tests/rlm/test_executor.py`); `ruff`, `ruff format`, `mypy --strict
 - **Single region.** Pinecone Starter is limited to AWS `us-east-1`.
 - **Docker Compose deployment only: intermittent `host.docker.internal` stalls to native
   Ollama.** See trade-off 24. Not present on the native run path.
+- **The `"research"` route can under-cover a broad question's real evidence set.** See
+  trade-off 28: `Settings.rlm_max_total_sub_agent_calls` (default 4) caps how many documents a
+  research turn can actually analyze once batching correctly respects document boundaries, which
+  can be fewer than the corpus's real number of relevant documents for a "summarize everything"
+  question — the turn then reports the honest, unfabricated conclusion ("no recurring root cause
+  identified in what was reviewed") rather than a comprehensive one. Open decision, not resolved:
+  raising the budget buys coverage at the cost of more sequential local-model calls per turn.

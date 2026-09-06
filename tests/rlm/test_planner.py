@@ -52,7 +52,7 @@ class TestDeterministicFallbackPlan:
         code = deterministic_fallback_plan("what happened?")
 
         assert "result" in code
-        for name in ("search", "batch", "sub_agents", "aggregate"):
+        for name in ("search", "group_by_document", "sub_agents", "aggregate"):
             assert name in code
         for forbidden in ("import ", "open(", "exec(", "eval("):
             assert forbidden not in code

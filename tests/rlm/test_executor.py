@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock
 import pytest
 from langchain_core.messages import BaseMessage, BaseMessageChunk
 
+from backend.app.core.config import Settings
 from backend.app.core.security.rbac import Principal, Role
 from backend.app.llm.provider import SchemaT
 from backend.app.retrieval.models import RetrievedChunk
@@ -71,6 +72,7 @@ def _context(*, run_nested_plan: Any = None) -> RLMContext:
         role="analyst",
         store=AsyncMock(),
         llm=_FakeLLM(),
+        settings=Settings(_env_file=None, rerank_enabled=False),
         budget=RLMBudget(max_depth=2, max_total_sub_agent_calls=4),
         depth=0,
         max_concurrent_sub_agents=4,

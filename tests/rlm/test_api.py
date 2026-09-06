@@ -19,6 +19,7 @@ import pytest
 from langchain_core.messages import BaseMessage, BaseMessageChunk
 from pydantic import BaseModel
 
+from backend.app.core.config import Settings
 from backend.app.core.errors import LLMTimeoutError, VectorStoreUnavailableError
 from backend.app.core.security.rbac import Principal, Role
 from backend.app.llm.provider import SchemaT
@@ -35,6 +36,7 @@ from backend.app.rlm.api import (
     build_sub_agent,
     build_sub_agents,
     filter_chunks,
+    group_by_document,
 )
 from backend.app.rlm.sandbox import run_sandboxed
 
@@ -94,6 +96,7 @@ def _context(
     depth: int = 0,
     run_nested_plan: Any = None,
     department: str | None = None,
+    settings: Settings | None = None,
 ) -> RLMContext:
     async def _default_nested(*, question: str, data: Any, context: RLMContext) -> str:
         raise NotImplementedError("this test does not expect nested-plan recursion")
@@ -105,6 +108,10 @@ def _context(
         role="analyst",
         store=AsyncMock(),  # non-None so `search` doesn't short-circuit; `hybrid_search` is faked
         llm=llm or _FakeLLM(),
+        # Reranking disabled by default so `search`-exercising tests never touch Postgres for
+        # the monthly-usage counter — `TestSearchReranking` below turns it on explicitly against
+        # a faked `rerank_chunks` instead of a real one.
+        settings=settings or Settings(_env_file=None, rerank_enabled=False),
         budget=RLMBudget(max_depth=max_depth, max_total_sub_agent_calls=max_total_sub_agent_calls),
         depth=depth,
         max_concurrent_sub_agents=max_concurrent_sub_agents,
@@ -208,6 +215,62 @@ class TestBatchChunks:
         assert batch_chunks([], 5) == []
 
 
+class TestGroupByDocument:
+    def test_never_splits_one_document_across_two_batches(self) -> None:
+        """The exact live-verified bug `batch()` caused: a document's sections (e.g. an
+        incident's Root Cause and Summary) landing in different batches, so no sub-agent ever
+        sees the whole document together. A small `max_batch_size` forces multiple batches;
+        each document's chunks must all land in exactly one of them."""
+        chunks = [
+            {"document_id": "doc-a", "section": "Summary"},
+            {"document_id": "doc-b", "section": "Summary"},
+            {"document_id": "doc-a", "section": "Root Cause"},
+            {"document_id": "doc-b", "section": "Root Cause"},
+        ]
+
+        batches = group_by_document(chunks, max_batch_size=1)
+
+        assert len(batches) == 2
+        for document_id in ("doc-a", "doc-b"):
+            containing = [
+                batch for batch in batches if any(c["document_id"] == document_id for c in batch)
+            ]
+            assert len(containing) == 1
+            assert all(c["document_id"] == document_id for c in containing[0])
+
+    def test_packs_multiple_small_documents_into_one_batch_up_to_the_size_cap(self) -> None:
+        chunks = [
+            {"document_id": "doc-a", "section": "s1"},
+            {"document_id": "doc-a", "section": "s2"},
+            {"document_id": "doc-b", "section": "s1"},
+            {"document_id": "doc-b", "section": "s2"},
+        ]
+
+        batches = group_by_document(chunks, max_batch_size=4)
+
+        assert batches == [chunks]
+
+    def test_a_document_larger_than_the_cap_still_gets_its_own_batch(self) -> None:
+        chunks = [{"document_id": "doc-a", "section": str(i)} for i in range(5)]
+
+        batches = group_by_document(chunks, max_batch_size=2)
+
+        assert batches == [chunks]
+
+    def test_preserves_first_appearance_order(self) -> None:
+        chunks = [
+            {"document_id": "doc-b", "section": "s"},
+            {"document_id": "doc-a", "section": "s"},
+        ]
+
+        batches = group_by_document(chunks, max_batch_size=1)
+
+        assert [batch[0]["document_id"] for batch in batches] == ["doc-b", "doc-a"]
+
+    def test_empty_input_produces_no_batches(self) -> None:
+        assert group_by_document([]) == []
+
+
 class TestRLMBudget:
     def test_reserves_up_to_the_limit_then_refuses(self) -> None:
         budget = RLMBudget(max_depth=2, max_total_sub_agent_calls=2)
@@ -216,6 +279,15 @@ class TestRLMBudget:
         assert budget.try_reserve_sub_agent_call() is True
         assert budget.try_reserve_sub_agent_call() is False
         assert budget.sub_agent_calls_made == 2
+
+    def test_reserves_the_rerank_call_exactly_once(self) -> None:
+        """CLAUDE.md's architecture invariant: reranking runs at most once per user turn,
+        never per RLM sub-agent."""
+        budget = RLMBudget(max_depth=2, max_total_sub_agent_calls=2)
+
+        assert budget.try_reserve_rerank() is True
+        assert budget.try_reserve_rerank() is False
+        assert budget.try_reserve_rerank() is False
 
 
 class TestSyncAsyncBridge:
@@ -325,6 +397,73 @@ class TestSyncAsyncBridge:
         )
 
         assert len(calls) == 1
+
+    async def test_search_reranks_once_when_the_budget_allows_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Parity fix: before this, `search` never reranked at all, unlike
+        `agents/nodes/retrieval.py`. Gated through `RLMBudget.try_reserve_rerank` — the once-
+        per-turn invariant CLAUDE.md names explicitly."""
+        rerank_calls: list[str] = []
+
+        async def _fake_hybrid_search(
+            store: object, *, query_text: str, role: str, top_k: int
+        ) -> list[RetrievedChunk]:
+            return [_chunk("a"), _chunk("b")]
+
+        async def _fake_rerank_chunks(
+            store: object, *, query: str, chunks: list[RetrievedChunk], settings: object
+        ) -> list[RetrievedChunk]:
+            rerank_calls.append(query)
+            return list(reversed(chunks))
+
+        monkeypatch.setattr(api, "hybrid_search", _fake_hybrid_search)
+        monkeypatch.setattr(api, "rerank_chunks", _fake_rerank_chunks)
+        context = _context(settings=Settings(_env_file=None, rerank_enabled=True))
+
+        outcome = await run_sandboxed(
+            "result = search('payment outages', top_k=5)",
+            injected_globals=build_rlm_globals(context),
+            timeout_seconds=2.0,
+        )
+
+        assert rerank_calls == ["payment outages"]
+        assert [c["chunk_id"] for c in outcome.result] == [
+            "b",
+            "a",
+        ]  # reversed by the fake reranker
+        assert context.budget.reranked is True
+
+    async def test_search_never_reranks_twice_in_the_same_turn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A second `search()` call sharing the same `RLMBudget` — e.g. a nested sub-agent's own
+        search, or a generated plan calling `search` more than once — must not spend a second
+        rerank call. The second call's chunks come back in raw (unreversed) RRF order."""
+        rerank_calls = 0
+
+        async def _fake_hybrid_search(
+            store: object, *, query_text: str, role: str, top_k: int
+        ) -> list[RetrievedChunk]:
+            return [_chunk("a")]
+
+        async def _fake_rerank_chunks(
+            store: object, *, query: str, chunks: list[RetrievedChunk], settings: object
+        ) -> list[RetrievedChunk]:
+            nonlocal rerank_calls
+            rerank_calls += 1
+            return chunks
+
+        monkeypatch.setattr(api, "hybrid_search", _fake_hybrid_search)
+        monkeypatch.setattr(api, "rerank_chunks", _fake_rerank_chunks)
+        context = _context(settings=Settings(_env_file=None, rerank_enabled=True))
+        search = build_search(context)
+        loop = asyncio.get_running_loop()
+
+        await loop.run_in_executor(None, search, "first")
+        await loop.run_in_executor(None, search, "second")
+
+        assert rerank_calls == 1
 
     async def test_sub_agent_bottoms_out_to_a_leaf_finding_at_max_depth(self) -> None:
         llm = _FakeLLM(
