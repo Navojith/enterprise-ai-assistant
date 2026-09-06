@@ -7,11 +7,14 @@ security-critical component is written and audited once"). Three independent lay
 required, none sufficient alone:
 
 1. **AST allowlist** (`validate_ast`) — the code is parsed, never executed, and walked before
-   any decision to run it is made. Imports, dunder-attribute access (`__class__`,
-   `__globals__`, ...), and the handful of builtins that reach the filesystem, the interpreter,
-   or process state (`open`, `exec`, `eval`, `compile`, `__import__`, `input`) are rejected
-   outright. This catches the large majority of "escape the sandbox" attempts, and does so
-   *before* a single line runs — a rejected plan costs nothing.
+   any decision to run it is made. Imports, dunder attribute access (`.__class__`,
+   `.__globals__`, ...) *and bare dunder names* (`__builtins__`, `__name__`, ... — live
+   security testing found `result = __builtins__` leaking the sandbox's own restricted builtins
+   dict past a version of this check that only looked at `.dunder` attribute access, never a
+   bare dunder identifier), and the handful of builtins that reach the filesystem, the
+   interpreter, or process state (`open`, `exec`, `eval`, `compile`, `__import__`, `input`) are
+   rejected outright. This catches the large majority of "escape the sandbox" attempts, and does
+   so *before* a single line runs — a rejected plan costs nothing.
 2. **Stripped builtins** (`_SAFE_BUILTINS`) — even code that passes the AST check runs against
    a `__builtins__` mapping containing only pure, side-effect-free functions. This is
    defense-in-depth against an AST-allowlist gap, not the primary control.
@@ -31,6 +34,19 @@ interrupted and is abandoned to finish (or spin) on its own; this is acceptable 
 assessment sandbox handling small analysis snippets, not for arbitrary untrusted code at
 production scale. A production deployment would move this to a subprocess or container with a
 real OS-enforced CPU/memory/time limit instead.
+
+**Found by live security testing, fixed before it could compound:** an abandoned CPU-bound
+thread does not just sit harmlessly — it permanently occupies one worker slot for the rest of
+the process's life. `run_sandboxed` therefore hands `exec()` to a small, **dedicated**
+`ThreadPoolExecutor` (`_SANDBOX_EXECUTOR`) rather than `loop.run_in_executor(None, ...)`'s
+process-wide default pool. Without this, repeated abusive calls (or a buggy generated RLM plan
+that happens to loop forever) would each permanently consume one slot of the *same* shared pool
+every other `run_in_executor(None, ...)`/`asyncio.to_thread` call in the process draws from —
+`min(32, os.cpu_count() + 4)` calls in and the entire application's blocking work would start
+queuing indefinitely, not just `python_analysis`/research. A dedicated pool contains that
+blast radius to sandbox calls alone: exhausting it degrades only analytics and research, never
+the rest of the assistant, and is still a config-sized, documented limit rather than an
+unbounded one growing silently.
 """
 
 from __future__ import annotations
@@ -39,12 +55,20 @@ import ast
 import asyncio
 import builtins as _builtins_module
 import io
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
 from backend.app.core.errors import SandboxViolationError
+
+# Dedicated, bounded pool for sandboxed `exec()` calls only — see the module docstring's "Found
+# by live security testing" note. Sized generously above this project's realistic concurrent
+# sandbox usage (RLM sub-agent fan-out defaults to sequential, `docs/DECISIONS.md` §9) rather
+# than tightly, since the goal is containing an abusive/runaway call's blast radius to sandbox
+# work, not rationing ordinary concurrent use.
+_SANDBOX_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="rlm-sandbox")
 
 # Builtins reaching the filesystem, the interpreter, process state, or import machinery.
 # Blocked by name regardless of how they are referenced (`open(...)`, `__builtins__.open(...)`).
@@ -137,6 +161,16 @@ class _ForbiddenNodeVisitor(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name) -> None:
         if node.id in _FORBIDDEN_NAMES:
             self.violations.append(f"use of {node.id!r} is not allowed")
+        # A *bare* dunder identifier (`__builtins__`, `__name__`, `__loader__`, ...) is a
+        # separate escape route from `.dunder` attribute access, and was not covered by
+        # `visit_Attribute` above until live security testing found `result = __builtins__`
+        # leaking the sandbox's own restricted builtins dict straight past the AST check — a
+        # `Name` node, never an `Attribute` node, so the existing dunder check never saw it.
+        # `exec()` always populates `__builtins__` (and other dunders) into the globals dict it
+        # is given, regardless of what `injected_globals` supplies, so this cannot be closed by
+        # controlling what the sandbox hands in — it has to be rejected in the code itself.
+        if node.id.startswith("__") and node.id.endswith("__"):
+            self.violations.append(f"use of dunder name {node.id!r} is not allowed")
         self.generic_visit(node)
 
     def visit_With(self, node: ast.With) -> None:
@@ -213,7 +247,7 @@ async def run_sandboxed(
     loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(
-            loop.run_in_executor(None, partial(_run_sync, code, sandbox_globals)),
+            loop.run_in_executor(_SANDBOX_EXECUTOR, partial(_run_sync, code, sandbox_globals)),
             timeout=timeout_seconds,
         )
     except TimeoutError as exc:

@@ -6,10 +6,12 @@ and the RLM planner's generated plans (Cycle 5). `docs/DELIVERY_PLAN.md`'s accep
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from backend.app.core.errors import SandboxViolationError
-from backend.app.rlm.sandbox import run_sandboxed, validate_ast
+from backend.app.rlm.sandbox import _SANDBOX_EXECUTOR, run_sandboxed, validate_ast
 
 
 def _violations(code: str) -> list[str]:
@@ -37,6 +39,21 @@ class TestValidateAst:
 
     def test_globals_dunder_access_is_rejected(self) -> None:
         assert any("dunder" in v for v in _violations("(lambda: 1).__globals__"))
+
+    def test_a_bare_dunder_name_is_rejected(self) -> None:
+        """Found by live security testing: `result = __builtins__` (a `Name` node, not an
+        `Attribute` node) leaked the sandbox's restricted builtins dict past a version of
+        `visit_Name` that only checked `_FORBIDDEN_NAMES`, never dunder-shaped identifiers in
+        general — `visit_Attribute`'s dunder check only ever saw `.__dunder__` access, not a
+        bare dunder name used directly."""
+        assert any("dunder" in v for v in _violations("result = __builtins__"))
+
+    def test_other_bare_dunder_names_exec_populates_are_also_rejected(self) -> None:
+        """`exec()` auto-populates more than just `__builtins__` into the globals dict it is
+        given — `__name__`, `__loader__`, `__spec__`, `__package__`, `__doc__` are all
+        candidates for the same leak, so the fix checks dunder *shape*, not one specific name."""
+        for name in ("__name__", "__loader__", "__package__", "__doc__"):
+            assert any("dunder" in v for v in _violations(f"result = {name}")), name
 
     def test_open_is_rejected(self) -> None:
         assert any("open" in v for v in _violations("open('/etc/passwd')"))
@@ -111,3 +128,15 @@ class TestRunSandboxed:
         the first (the AST check)."""
         with pytest.raises(SandboxViolationError, match="NameError"):
             await run_sandboxed("result = type(1)", timeout_seconds=1.0)
+
+
+class TestSandboxExecutorIsolation:
+    """Found by live security testing (docs/ASSUMPTIONS_AND_TRADEOFFS.md): a sandboxed
+    CPU-bound infinite loop cannot be killed once `asyncio.wait_for` gives up on it (see the
+    module docstring), so it permanently occupies one worker thread for the process's life.
+    Pins that this no longer happens against the same shared pool every other
+    `run_in_executor(None, ...)` call in the process would draw from."""
+
+    def test_the_sandbox_uses_its_own_dedicated_executor_not_the_process_default(self) -> None:
+        assert isinstance(_SANDBOX_EXECUTOR, ThreadPoolExecutor)
+        assert _SANDBOX_EXECUTOR._max_workers > 0
