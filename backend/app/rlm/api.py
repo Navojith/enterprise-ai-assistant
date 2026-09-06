@@ -68,6 +68,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextvars
+import re
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
@@ -562,10 +563,94 @@ def build_sub_agents(
     return sub_agents
 
 
+# Aggregation should primarily *synthesize* the evidence it is handed, not explore alternative
+# phrasings of it — unlike the RLM planner (`rlm/planner.py`, `reasoning=True` at the provider's
+# default temperature, where creative variety in *strategy* is worth having), `aggregate` is a
+# one-shot reduction over a fixed, already-correct set of findings. Lower temperature is
+# unrelated to and does not substitute for the completeness check below: it reduces how often a
+# degraded draw happens, the check catches it when one happens anyway.
+_AGGREGATE_TEMPERATURE = 0.2
+
+# Matches a bracketed `[Title]` citation exactly like `agents/nodes/response.py`'s own citation
+# convention and `guardrails/citations.py`'s verification — every sub-agent finding and the
+# aggregate prompt itself are both instructed to cite this way. `\[([^\[\]]+)\]` deliberately
+# does not match nested or empty brackets.
+_CITATION_PATTERN = re.compile(r"\[([^\[\]]+)\]")
+
+
+def _extract_citations(text: str) -> set[str]:
+    """Every bracketed `[Title]` citation appearing in `text`, ignoring a bracket that is empty
+    or purely numeric — a numbered-list marker like `[1]`, never a real citation in this
+    codebase's convention, which always cites a document *title*."""
+    return {
+        citation
+        for raw in _CITATION_PATTERN.findall(text)
+        if (citation := raw.strip()) and not citation.isdigit()
+    }
+
+
+def _missing_citations(findings_text: str, summary: str) -> set[str]:
+    """Citations the raw sub-agent findings actually named that the aggregated `summary`
+    dropped entirely — a direct, non-brittle signal of *evidence* loss during synthesis, not a
+    comparison of prose or phrasing (which legitimate summarization is expected to change
+    freely). The aggregate prompt already instructs the model to "keep their citations intact",
+    so this checks that instruction was actually followed rather than trusting it was."""
+    return _extract_citations(findings_text) - _extract_citations(summary)
+
+
+async def _retry_aggregate_once(
+    context: RLMContext,
+    *,
+    messages: list[SystemMessage | HumanMessage],
+    findings_text: str,
+    original: AggregatedFindings,
+    missing: set[str],
+) -> AggregatedFindings:
+    """Exactly one bounded retry, with the specific missing citations fed back as feedback —
+    the same "one retry with concrete feedback" shape `rlm/planner.py::_retry_messages` already
+    uses for a validation failure, applied here to an incompleteness signal instead. Never
+    raises and never loops: an `AppError` on the retry call, or a retry that does not actually
+    reduce how many citations are missing, both fall back to `original` rather than discarding a
+    validated (if incomplete) result for nothing."""
+    feedback = HumanMessage(
+        content=(
+            "Your summary above did not mention the following citation(s), even though the "
+            f"findings actually contained them: {', '.join(sorted(missing))}. Rewrite the "
+            "summary to include every one of them, without dropping anything you already "
+            "included correctly."
+        )
+    )
+    try:
+        retry_result = await context.llm.astructured(
+            [*messages, feedback],
+            schema=AggregatedFindings,
+            reasoning=True,
+            temperature=_AGGREGATE_TEMPERATURE,
+        )
+    except AppError as exc:
+        logger.warning("rlm_aggregate_retry_failed", error=str(exc))
+        return original
+
+    retry_missing = _missing_citations(findings_text, retry_result.summary)
+    if len(retry_missing) < len(missing):
+        logger.info(
+            "rlm_aggregate_retry_improved",
+            missing_before=len(missing),
+            missing_after=len(retry_missing),
+        )
+        return retry_result
+    logger.warning(
+        "rlm_aggregate_retry_did_not_improve",
+        missing_before=len(missing),
+        missing_after=len(retry_missing),
+    )
+    return original
+
+
 def build_aggregate(context: RLMContext) -> Callable[[list[str], str], dict[str, Any]]:
     async def _aggregate(findings: list[str], question: str) -> dict[str, Any]:
         findings_text = "\n".join(f"- {finding}" for finding in findings) or "(no findings)"
-        messages = [
+        messages: list[SystemMessage | HumanMessage] = [
             SystemMessage(
                 content=(
                     "Combine the sub-agent findings below into one synthesized answer. "
@@ -579,11 +664,32 @@ def build_aggregate(context: RLMContext) -> Callable[[list[str], str], dict[str,
         ]
         try:
             result = await context.llm.astructured(
-                messages, schema=AggregatedFindings, reasoning=True
+                messages,
+                schema=AggregatedFindings,
+                reasoning=True,
+                temperature=_AGGREGATE_TEMPERATURE,
             )
         except AppError as exc:
             logger.warning("rlm_aggregate_failed", error=str(exc))
             return {"summary": " ".join(findings) or "(no findings)", "recurring_themes": []}
+
+        # A completeness guard, not a correctness one: this can only catch evidence that a
+        # sub-agent actually returned and the aggregation step then dropped — it has no way to
+        # know about, and does not claim to fix, evidence the search/planning stages never
+        # retrieved in the first place (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's
+        # second addendum is explicit about that distinction).
+        missing = _missing_citations(findings_text, result.summary)
+        if missing:
+            logger.warning(
+                "rlm_aggregate_incomplete", missing_citations=sorted(missing), question=question
+            )
+            result = await _retry_aggregate_once(
+                context,
+                messages=messages,
+                findings_text=findings_text,
+                original=result,
+                missing=missing,
+            )
         return {"summary": result.summary, "recurring_themes": result.recurring_themes}
 
     def aggregate(findings: list[str], question: str) -> dict[str, Any]:

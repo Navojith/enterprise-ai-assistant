@@ -42,12 +42,21 @@ class LLMProvider(Protocol):
         *,
         schema: type[SchemaT],
         reasoning: bool = False,
+        temperature: float | None = None,
     ) -> SchemaT:
         """Return one validated `schema` instance, decoded under a JSON-schema grammar.
 
         `reasoning` defaults to `False` — the Supervisor and Validator want the fastest,
         cheapest decision (`docs/DECISIONS.md` §5) — but the signature accepts `True` for
         Cycle 5's RLM planner, where reasoning quality is worth the extra tokens.
+
+        `temperature` defaults to `None` — the provider's own default sampling, unchanged from
+        every call site that existed before this parameter did. A caller passes an explicit
+        value only when lower variance is worth more than it costs: `rlm/api.py::build_aggregate`
+        is the first such caller, since synthesizing several findings into one summary is a
+        task where the model should faithfully combine what it was given rather than explore
+        alternative phrasings (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's second
+        addendum).
         """
         ...
 

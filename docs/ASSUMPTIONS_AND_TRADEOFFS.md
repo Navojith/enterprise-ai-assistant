@@ -1145,6 +1145,106 @@ plan, but cannot make a narrow one wider; see the "Known limitations" bullet bel
 distinction. 10 new/updated tests total across both passes (368, up from 360); `ruff`,
 `ruff format`, `mypy --strict` all pass clean.
 
+**Second addendum, later session: chased down a recurrence of the same symptom (an Analyst's
+research-route answer to the identical spec question found only 1 of the corpus's 13 payment
+incidents and reported "no recurring root causes identified") and found the *narrow-search*
+explanation above is not the whole story — in this run, search was never the bottleneck at
+all.** Rather than guess, every stage of that specific live run's actual pipeline (the
+deterministic fallback plan fired again — `search(question, top_k=20)`, `group_by_document`,
+`sub_agents`, `aggregate`) was replayed in isolation against the live stack, stage by stage:
+
+1. **`search(question, top_k=20)` against the real Pinecone index returned all 13 of the
+   corpus's real payment incidents** — 17 of their chunks plus 3 unrelated ones, comfortably
+   within the top_k=20 window. The "narrow search" explanation the first addendum documented
+   does not apply here: recall was already complete before any batching happened.
+2. **`group_by_document` produced 3 sensible batches (8/8/4 chunks)**, none splitting an
+   incident's sections apart, using only 3 of the 8 available sub-agent calls — the raised
+   budget was not exhausted either.
+3. **All three sub-agent findings, replayed against the live model, were independently
+   excellent** — each correctly enumerated every incident in its batch with the correct root
+   cause, and correctly identified the recurring causes *within* that batch.
+4. **The replayed `aggregate()` call, given those exact three findings, was also excellent** —
+   its `summary` field correctly listed all 13 incidents and correctly identified all 5 real
+   recurring root causes across the whole corpus (one real, separate, minor bug surfaced here:
+   its structured `recurring_themes` list field came back empty even though the prose `summary`
+   listed them correctly — a schema-population inconsistency, not something that reached the
+   user, since `agents/nodes/research.py::_stringify_research_result` only appends
+   `recurring_themes` to the text *if it is non-empty* and falls back to the full `summary`
+   string otherwise, which is what happened here).
+5. **The replayed Response node, given that exact good `research_output`, produced a correct,
+   fully-cited final answer** — all 13 incidents, all 5 recurring causes, every citation intact.
+
+Every single stage, replayed independently, was correct. **The conclusion this forces:** the
+retrieval and batching layers are reliable — this was not a coverage gap, a budget-exhaustion
+gap, or a code defect anywhere in the pipeline. What actually varies is irreducible LLM-sampling
+variance across the pipeline's **3–4 sequential generative calls** (up to 3 sub-agent findings
+plus one `aggregate` call plus one Response call, each an independent draw from a 4B model), not
+any single identifiable bug. A single-hop `"retrieval"` turn only ever makes *one* such
+generative call, so it has one chance to be wrong; a `"research"` turn chains several, so its
+probability of an end-to-end-correct answer is roughly the product of each stage's own
+correctness probability — meaning a `"research"` answer can visibly underperform the equivalent
+`"retrieval"` answer even when every individual stage is usually correct, purely because there
+are more sequential rolls of the dice, not because any one of them is broken. This refines,
+rather than repeats, the first addendum's explanation: a narrow plan is *one* way this pipeline
+can produce a bad answer, but not the only one, and not what happened in this specific
+recurrence. No code was changed chasing this down — the question of whether to spend effort
+mitigating multi-call variance (e.g. a self-consistency check or retry specifically on
+`aggregate`) versus leaving it as a documented, accepted cost of the multi-stage RLM design was
+put to the user rather than resolved unilaterally.
+
+**Third addendum, same investigation: the user chose a targeted mitigation, implemented and
+live-verified rather than assumed to work.** `rlm/api.py::build_aggregate` now does three
+things it did not before, all scoped narrowly to *this* stage rather than the whole pipeline:
+
+1. **A completeness check** (`_missing_citations`) compares every bracketed `[Title]` citation
+   the raw sub-agent findings actually contained against those the aggregated `summary`
+   mentions. This deliberately checks citation *presence*, not prose or phrasing — the aggregate
+   prompt already instructs the model to "keep their citations intact," so this verifies that
+   instruction was followed rather than trusting it was, without penalizing legitimate
+   summarization (which is free to paraphrase everything else).
+2. **One bounded retry** (`_retry_aggregate_once`) fires only when the check finds a gap,
+   feeding back exactly which citations were dropped. It is never unconditional, never loops,
+   and never raises: an `AppError` on the retry, or a retry that is no more complete than the
+   original, both fall back to the original (already-valid, if incomplete) result rather than
+   discarding it.
+3. **A lower temperature** (`_AGGREGATE_TEMPERATURE = 0.2`, threaded through a new optional
+   `temperature` parameter on `LLMProvider.astructured` — `docs/DECISIONS.md` §13) on both the
+   initial and retry calls, on the reasoning that synthesizing given evidence should be more
+   deterministic than the free-ranging strategy generation `rlm/planner.py` does at the
+   provider's default temperature.
+
+**This is explicitly a completeness guard, not a correctness one**, per the user's own scoping:
+it can only recover evidence a sub-agent *returned* that aggregation then dropped, and has no
+way to detect (nor claims to fix) evidence the search or planning stages failed to retrieve in
+the first place — trade-off 28's first addendum's "narrow plan" failure mode is a materially
+different problem this does not touch.
+
+**Live-verified, not just unit-tested** (5 new tests in `tests/rlm/test_api.py`'s
+`TestAggregateCompletenessCheck` cover a clean pass, a retry that improves, a retry that
+doesn't, and a retry call that itself fails — 373 tests total, `ruff`/`ruff format`/
+`mypy --strict` all clean): replaying the *real* `build_aggregate` wiring against live Ollama
+with the three real sub-agent findings from the second addendum's investigation, the very first
+live run demonstrated the fix earning its keep rather than merely passing tests — the initial
+attempt's summary dropped **all 13** citations (logged as `rlm_aggregate_incomplete`), the
+bounded retry fired automatically, and it recovered a complete, correctly-cited summary naming
+all 13 incidents (`rlm_aggregate_retry_improved missing_after=0`). This is direct, live evidence
+that the exact failure mode chased down above (aggregation silently dropping evidence a
+sub-agent actually found) is real and recoverable, not hypothetical.
+
+**A residual, different-shaped issue was found in the same run, disclosed rather than
+smoothed over**: even after the retry recovered all 13 citations correctly, the model's own
+prose still ended with "Recurring root causes: None (only one incident report is present in
+the evidence)" — a leftover, contradicted-by-the-text-above-it sentence (apparently carried
+over from one single-incident sub-agent finding's own phrasing), and the structured
+`recurring_themes` field came back empty despite the corpus genuinely having 5 recurring
+causes across those 13 incidents. The citation-completeness check does not catch this, by
+design and by the user's explicit scoping: it verifies *evidence presence*, not whether the
+model's own concluding sentence or structured summary field correctly characterizes that
+evidence — a distinct class of hallucination (an internally inconsistent conclusion, not
+missing evidence) that a citation-presence check cannot see and was not asked to catch. Left as
+an open, disclosed limitation rather than silently patched with a broader (and, per the user's
+explicit instruction, unwanted) consistency-verification mechanism.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see
@@ -1169,7 +1269,7 @@ distinction. 10 new/updated tests total across both passes (368, up from 360); `
 - **Docker Compose deployment only: intermittent `host.docker.internal` stalls to native
   Ollama.** See trade-off 24. Not present on the native run path.
 - **The `"research"` route's coverage of a broad question still varies with the model's own
-  generated plan, not just the sub-agent budget.** Trade-off 28's addendum: raising
+  generated plan, not just the sub-agent budget.** Trade-off 28's first addendum: raising
   `rlm_max_total_sub_agent_calls` 4 -> 8 gives real headroom when the model's plan requests a
   wide candidate set (`top_k=100`, seen on two live runs), but a plan that instead chooses a
   small `top_k` (10, seen on a third live run) simply never generates enough batches to use that
@@ -1177,3 +1277,20 @@ distinction. 10 new/updated tests total across both passes (368, up from 360); `
   model-bound variance trade-off 1 already names, applied to plan generation specifically: a 4B
   model's own choices (query text, `top_k`, which functions to call) differ run to run for an
   identical question, and no amount of downstream budget raises that.
+- **Even a fully complete search and correct batching can still produce a visibly wrong
+  `"research"` answer, because of irreducible LLM-sampling variance across the pipeline's 3–4
+  sequential generative calls, not a coverage gap.** Trade-off 28's second addendum: a later
+  recurrence of the same symptom was traced, stage by stage against the live model, to a
+  pipeline where search retrieved *all* relevant evidence and batching was correct, yet the
+  final answer was still narrow and wrong — every stage replayed independently in isolation was
+  correct, so the defect is not localizable to any one stage. A `"research"` turn chains several
+  independent generative draws (sub-agent findings, `aggregate`, the final Response call) where
+  `"retrieval"` only makes one, so its end-to-end correctness is roughly the product of each
+  stage's own reliability — an inherent cost of the multi-stage design on a small model, not a
+  bug with a single fix. Trade-off 28's third addendum narrowed, rather than eliminated, this:
+  `aggregate`'s own citation-completeness check and bounded retry (`docs/DECISIONS.md` §13) now
+  catches and recovers the specific case of a sub-agent's evidence being dropped during
+  synthesis — live-verified actually firing and recovering a real bad draw, not just passing
+  unit tests — but a degraded draw at the sub-agent or Response stage, or an internally
+  inconsistent conclusion the aggregated summary reaches despite complete evidence (also
+  observed live — see the addendum), is not covered by this or any other check in the pipeline.

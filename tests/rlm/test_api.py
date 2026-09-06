@@ -12,7 +12,7 @@ import contextvars
 import dataclasses
 from collections.abc import AsyncIterator, Sequence
 from datetime import date
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock
 
 import pytest
@@ -64,17 +64,35 @@ class _FakeLLM:
     `LLMProvider` Protocol) — trimmed only in that a single result list serves every call."""
 
     def __init__(
-        self, *, results: list[BaseModel] | None = None, error: Exception | None = None
+        self,
+        *,
+        results: list[BaseModel] | None = None,
+        error: Exception | None = None,
+        fail_on_call: int | None = None,
     ) -> None:
         self._results = list(results or [])
         self._error = error
+        # `fail_on_call` (1-indexed) raises `error` only on that specific call, falling through
+        # to `_results` on every other call — needed to test a retry's *own* call failing
+        # without also breaking every existing test that passes `error=` alone expecting it to
+        # fail unconditionally (the default, `fail_on_call=None`, preserves that exact behavior).
+        self._fail_on_call = fail_on_call
         self.calls = 0
+        # Recorded per call so a test can assert *what* was requested, not just how many times —
+        # e.g. that `build_aggregate` actually asked for a lower, more deterministic temperature.
+        self.temperatures_requested: list[float | None] = []
 
     async def astructured(
-        self, messages: Sequence[BaseMessage], *, schema: type[SchemaT], reasoning: bool = False
+        self,
+        messages: Sequence[BaseMessage],
+        *,
+        schema: type[SchemaT],
+        reasoning: bool = False,
+        temperature: float | None = None,
     ) -> SchemaT:
         self.calls += 1
-        if self._error is not None:
+        self.temperatures_requested.append(temperature)
+        if self._error is not None and self._fail_on_call in (None, self.calls):
             raise self._error
         result = self._results[min(self.calls, len(self._results)) - 1]
         assert isinstance(result, schema)
@@ -558,6 +576,124 @@ class TestSyncAsyncBridge:
         )
 
         assert outcome.result == {"summary": "f1 f2", "recurring_themes": []}
+
+    async def test_aggregate_requests_a_lower_temperature_than_the_provider_default(self) -> None:
+        """`aggregate` should synthesize the evidence it is handed, not explore alternative
+        phrasings of it (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's second addendum) —
+        verifies the wiring actually asks for that, not just that the feature exists somewhere."""
+        llm = _FakeLLM(results=[AggregatedFindings(summary="[A] cause one", recurring_themes=[])])
+        context = _context(llm=llm)
+
+        await run_sandboxed(
+            "result = aggregate(data, 'q')",
+            injected_globals={**build_rlm_globals(context), "data": ["[A] cause one"]},
+            timeout_seconds=2.0,
+        )
+
+        assert llm.temperatures_requested == [api._AGGREGATE_TEMPERATURE]
+
+
+class TestAggregateCompletenessCheck:
+    """`build_aggregate`'s post-aggregation completeness guard: does the synthesized `summary`
+    still mention every `[Title]` citation the raw sub-agent findings actually contained? This
+    is deliberately narrower than a correctness check — it can only catch evidence a sub-agent
+    *returned* that aggregation then dropped, never evidence the search/planning stages failed
+    to retrieve in the first place (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's second
+    addendum names this distinction explicitly)."""
+
+    _FINDINGS: ClassVar[list[str]] = ["[Incident A] root cause X", "[Incident B] root cause Y"]
+
+    async def test_no_retry_when_the_summary_already_preserves_every_citation(self) -> None:
+        llm = _FakeLLM(
+            results=[
+                AggregatedFindings(
+                    summary="[Incident A]: cause X. [Incident B]: cause Y.",
+                    recurring_themes=[],
+                )
+            ]
+        )
+        context = _context(llm=llm)
+
+        outcome = await run_sandboxed(
+            "result = aggregate(data, 'q')",
+            injected_globals={**build_rlm_globals(context), "data": self._FINDINGS},
+            timeout_seconds=2.0,
+        )
+
+        assert llm.calls == 1
+        assert outcome.result["summary"] == "[Incident A]: cause X. [Incident B]: cause Y."
+
+    async def test_retries_once_and_uses_the_improved_result_when_a_citation_is_dropped(
+        self,
+    ) -> None:
+        llm = _FakeLLM(
+            results=[
+                AggregatedFindings(summary="[Incident A]: cause X.", recurring_themes=[]),
+                AggregatedFindings(
+                    summary="[Incident A]: cause X. [Incident B]: cause Y.",
+                    recurring_themes=["cause X"],
+                ),
+            ]
+        )
+        context = _context(llm=llm)
+
+        outcome = await run_sandboxed(
+            "result = aggregate(data, 'q')",
+            injected_globals={**build_rlm_globals(context), "data": self._FINDINGS},
+            timeout_seconds=2.0,
+        )
+
+        assert llm.calls == 2
+        assert outcome.result == {
+            "summary": "[Incident A]: cause X. [Incident B]: cause Y.",
+            "recurring_themes": ["cause X"],
+        }
+        # The retry still asked for the same low, deterministic temperature, not the provider
+        # default.
+        assert llm.temperatures_requested == [api._AGGREGATE_TEMPERATURE] * 2
+
+    async def test_retry_that_does_not_improve_falls_back_to_the_original_result(self) -> None:
+        """Bounded: a retry that is no more complete than the first attempt must not be
+        preferred over it, and must not trigger a second retry — exactly 2 calls, never more."""
+        llm = _FakeLLM(
+            results=[
+                AggregatedFindings(summary="[Incident A]: cause X.", recurring_themes=[]),
+                AggregatedFindings(
+                    summary="[Incident A]: cause X, still incomplete.", recurring_themes=[]
+                ),
+            ]
+        )
+        context = _context(llm=llm)
+
+        outcome = await run_sandboxed(
+            "result = aggregate(data, 'q')",
+            injected_globals={**build_rlm_globals(context), "data": self._FINDINGS},
+            timeout_seconds=2.0,
+        )
+
+        assert llm.calls == 2
+        assert outcome.result == {"summary": "[Incident A]: cause X.", "recurring_themes": []}
+
+    async def test_retry_call_failure_gracefully_falls_back_to_the_original_result(self) -> None:
+        """The retry attempt itself can fail (timeout, model unavailable) without losing the
+        first attempt's already-validated, if incomplete, result — matches every other
+        degradation in this codebase (a bad situation gets worse gracefully, never a hard
+        failure this deep in a research turn)."""
+        llm = _FakeLLM(
+            results=[AggregatedFindings(summary="[Incident A]: cause X.", recurring_themes=[])],
+            error=LLMTimeoutError("timed out"),
+            fail_on_call=2,
+        )
+        context = _context(llm=llm)
+
+        outcome = await run_sandboxed(
+            "result = aggregate(data, 'q')",
+            injected_globals={**build_rlm_globals(context), "data": self._FINDINGS},
+            timeout_seconds=2.0,
+        )
+
+        assert llm.calls == 2
+        assert outcome.result == {"summary": "[Incident A]: cause X.", "recurring_themes": []}
 
 
 class TestBuildSubAgentAndSubAgentsDirectly:

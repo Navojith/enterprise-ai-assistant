@@ -426,3 +426,73 @@ oversight: `docs/DECISIONS.md` §2 already scopes long-term memory (a persistent
 store) out as a bonus item not built, and the two mechanisms above are explicitly *session*
 memory — "session" meaning "this `thread_id`," not "this browser session" or "this user across
 every conversation they've ever had" (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` assumption 3).
+
+---
+
+## 13. `aggregate`'s citation-completeness check and bounded retry, and why it stops there
+
+`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's investigation (first and second addenda)
+root-caused the `"research"` route occasionally producing a visibly worse answer than
+`"retrieval"` on the identical question to irreducible LLM-sampling variance across the RLM
+pipeline's 3–4 sequential generative calls, not a coverage gap or a code defect — every stage,
+replayed independently against the live model, was individually correct. The user, asked
+explicitly whether to mitigate this or accept it as documented variance, chose a targeted
+mitigation over both extremes ("accept as-is" and "no large architectural change"), scoped to
+exactly one place: `rlm/api.py::build_aggregate`, the step that reduces several independently-
+correct sub-agent findings into the one summary a research turn's answer is actually built from.
+
+**Why `aggregate` specifically, not the whole pipeline.** A self-consistency or retry mechanism
+added at every stage (sub-agent findings, `aggregate`, the final Response call) would multiply
+latency across an already-expensive pipeline (`docs/DECISIONS.md` §9) for diminishing return —
+`aggregate` is the one stage that both *sees everything* (every sub-agent's finding, in one
+call) and is the last point before that information either survives into the final answer or is
+lost for good. A dropped citation here is unrecoverable downstream; a slightly-imperfect
+individual sub-agent finding usually is not, since `aggregate` synthesizes across several of
+them.
+
+**The mechanism, deliberately narrow:**
+
+1. **Citation-presence check, not a correctness check.** `_missing_citations` compares every
+   bracketed `[Title]` the raw findings actually contained against those the aggregated
+   `summary` mentions — checking that the aggregate prompt's own existing instruction ("keep
+   their citations intact") was followed, not re-judging whether the *content* is accurate.
+   This is deliberately not a fuzzy or semantic check: citations are a small, well-defined
+   substring the prompt already asks to preserve verbatim, so checking for their literal
+   presence catches real evidence loss without penalizing legitimate paraphrasing of everything
+   else — the brittleness the user explicitly asked to avoid would come from diffing prose or
+   phrasing, not from checking whether a citation survived at all.
+2. **At most one retry**, firing only when the check finds a gap, feeding back exactly which
+   citations were dropped (the same "one retry with concrete feedback" shape
+   `rlm/planner.py::_retry_messages` already uses for AST validation failures, applied here to
+   an incompleteness signal instead of a syntax one). Never unconditional, never loops: an
+   `AppError` on the retry call, or a retry that does not actually reduce how many citations are
+   missing, both fall back to the original, already-valid (if incomplete) result rather than
+   discarding it or trying again.
+3. **A lower temperature** (`_AGGREGATE_TEMPERATURE = 0.2`) on both the initial and retry calls
+   — threaded through a new optional `temperature: float | None = None` parameter added to
+   `LLMProvider.astructured` (and `OllamaProvider`/`FallbackChain`'s implementations), defaulting
+   to `None` everywhere else so no existing call site's behavior changes. `aggregate` is a
+   one-shot reduction over an already-fixed, already-correct set of findings — synthesis, not
+   exploration — unlike the RLM planner, which benefits from the provider's default temperature
+   because generating a varied *strategy* is exactly what that step should be free to do.
+
+**What this does and does not claim to fix.** This is explicitly a *completeness* guard, not a
+*correctness* one: it can only recover evidence a sub-agent actually returned that aggregation
+then dropped. It has no visibility into, and does not claim to address, evidence the search or
+planning stages failed to retrieve in the first place (trade-off 28's first addendum's "narrow
+plan" problem is a different failure mode this does not touch), nor a sub-agent's own finding
+being wrong, nor the aggregated summary reaching an internally inconsistent conclusion despite
+complete evidence (observed live in the same verification pass that confirmed the fix working —
+see trade-off 28's third addendum). Distinguishing what a fix at this one stage can and cannot
+plausibly cover, rather than letting a narrow, verified improvement read as "the variance
+problem is now solved," was treated as more important than looking maximally finished.
+
+**Verified live, not just unit-tested.** 5 new tests (`tests/rlm/test_api.py`'s
+`TestAggregateCompletenessCheck`, 373 total) cover a clean pass, a retry that improves, a retry
+that does not, and a retry call that itself fails — but the mitigation was also replayed through
+the *real* `build_aggregate` wiring against live Ollama, using real sub-agent findings from the
+original investigation, before being called done. That live run demonstrated the fix earning
+its keep on the first attempt: the initial call's summary dropped all 13 real citations, the
+retry fired automatically, and it recovered a complete, correctly-cited summary — direct
+evidence the specific failure mode this was built for is real and recoverable, not merely
+theoretically possible.

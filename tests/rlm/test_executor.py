@@ -48,7 +48,12 @@ class _FakeLLM:
     `tests/llm/test_chain.py::_FakeProvider` does."""
 
     async def astructured(
-        self, messages: Sequence[BaseMessage], *, schema: type[SchemaT], reasoning: bool = False
+        self,
+        messages: Sequence[BaseMessage],
+        *,
+        schema: type[SchemaT],
+        reasoning: bool = False,
+        temperature: float | None = None,
     ) -> SchemaT:
         if schema.__name__ == "SubAgentFinding":
             return schema(reasoning="r", finding="a finding")
