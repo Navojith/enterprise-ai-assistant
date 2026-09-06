@@ -4,9 +4,10 @@ functions specifically so they are testable without a compiled graph, a checkpoi
 
 from __future__ import annotations
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END
 
-from backend.app.agents.graph import _after_supervisor, _make_after_validator
+from backend.app.agents.graph import _after_supervisor, _make_after_validator, build_graph
 from backend.app.agents.state import AgentState
 
 
@@ -55,3 +56,19 @@ class TestAfterValidator:
         after_validator = _make_after_validator(max_validator_retries=2)
 
         assert after_validator(_state(validation_passed=False, retry_count=2)) == "response"
+
+
+class TestBuildGraph:
+    """Compiles the real graph (an `InMemorySaver`, no LLM or Pinecone needed at compile time)
+    to pin its topology — specifically, that Cycle 6's guardrail node is wired as the graph's
+    entry point, ahead of the supervisor, per `agents/graph.py`'s module docstring."""
+
+    def test_guardrail_is_the_graph_s_entry_point(self) -> None:
+        compiled = build_graph(InMemorySaver(), max_validator_retries=1)
+        graph = compiled.get_graph()
+
+        node_names = set(graph.nodes)
+        assert "guardrail" in node_names
+        edges = {(edge.source, edge.target) for edge in graph.edges}
+        assert ("__start__", "guardrail") in edges
+        assert ("guardrail", "supervisor") in edges

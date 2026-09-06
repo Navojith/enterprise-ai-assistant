@@ -29,6 +29,7 @@ from backend.app.api.deps import require_permission
 from backend.app.core.errors import AppError, GraphUnavailableError
 from backend.app.core.logging import get_correlation_id
 from backend.app.core.security.rbac import Permission, Principal
+from backend.app.guardrails.validators import validate_user_message
 from backend.app.observability.events import ActivityEvent, ActivityEventType
 
 logger = structlog.get_logger(__name__)
@@ -103,10 +104,16 @@ async def chat_stream(
     payload: ChatRequest,
     principal: Principal = Depends(_require_chat),
 ) -> StreamingResponse:
-    # Checked here, before the stream opens, so an unavailable graph is a normal 503 JSON error
-    # through the standard exception handler — not an SSE frame sent after headers already
-    # promised a text/event-stream body (see `_stream_turn`'s own docstring note on why a
-    # mid-stream `AppError` can only ever become one more event, never a status code).
+    # Shape validation (guardrails/validators.py), not intent — whitespace-only, control
+    # characters, pathological repetition. Deliberately *not* prompt-injection screening: that
+    # runs inside the graph itself (`agents/nodes/guardrail.py`), because a block there must be
+    # observable in the Agent Activity Panel and a LangSmith trace, which nothing outside
+    # `graph.astream()` ever is. Checked here, before the stream opens, for the same reason the
+    # graph-availability check below is: a normal 422/503 JSON error through the standard
+    # exception handler, not an SSE frame sent after headers already promised a
+    # text/event-stream body.
+    validate_user_message(payload.message)
+
     if request.app.state.graph is None:
         raise GraphUnavailableError(
             "The conversation graph is not available — its checkpointer failed to initialize "

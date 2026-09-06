@@ -429,6 +429,37 @@ unconditional instruction became a latent bug that only a real multi-source turn
 retrieval-only one — could surface; any future evidence channel added to `response_node` should
 extend the same three-way (now, N-way) check rather than reason about `retrieved_chunks` alone.
 
+### 19. Injection-detection heuristics necessarily encode a fixed, English-language pattern list
+
+**Chosen because:** `guardrails/injection.py::heuristic_screen`'s confident `BLOCK` tier is a
+curated set of regexes for the three attack shapes ASSESSMENT.md names (instruction override,
+data exfiltration, tool abuse), tuned against real phrasings including the acceptance test's own
+literal example. This is deliberately the *cheap, deterministic* half of the two-tier design
+`docs/DECISIONS.md` §10 records — zero LLM calls, fully unit-testable, and it is what keeps this
+project's genuinely scarce resource (one local `qwen3:4b` instance) out of the hot path for the
+common case.
+
+**Cost:** a fixed pattern list cannot catch every phrasing of an attack, is English-centric, and
+can be evaded by anyone who studies it — the classic limitation of any denylist-based filter.
+The `AMBIGUOUS` tier (a sensitive watchlist word with no confident pattern match) exists
+specifically to route the harder cases to the schema-constrained classifier rather than silently
+allowing them, but a sufficiently well-disguised attack that trips neither the strong patterns
+nor the watchlist would pass through as `ALLOW` with no classifier call at all.
+
+**Mitigation, not elimination:** `frame_untrusted_content`'s untrusted-data delimiter
+(`guardrails/injection.py`, applied in `agents/nodes/response.py` and `rlm/api.py`) is a second,
+independent layer that does not depend on recognizing an attack pattern at all — it constrains
+what the model is told to *do* with any content it did not itself generate, regardless of
+whether that content's phrasing was ever seen before. `guardrails/citations.py` and
+`guardrails/brand.py` are a third layer, catching the *output* of a successful injection (a
+fabricated citation, a broken persona) even if the input-side screen missed it. No single layer
+is asked to be complete on its own.
+
+**What would change in production:** a real deployment would likely add a maintained, updated
+denylist or a dedicated injection-classification model/service behind the same
+`heuristic_screen` -> classifier escalation shape this cycle already establishes — the
+architecture does not need to change, only the pattern list and the classifier's sophistication.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see

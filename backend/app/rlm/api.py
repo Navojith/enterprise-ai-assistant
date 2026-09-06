@@ -76,6 +76,7 @@ from pydantic import BaseModel, Field
 
 from backend.app.core.errors import AppError
 from backend.app.core.security.rbac import Principal
+from backend.app.guardrails.injection import UNTRUSTED_CONTENT_INSTRUCTION, frame_untrusted_content
 from backend.app.llm.provider import LLMProvider
 from backend.app.observability.events import ActivityEvent, ActivityEventType
 from backend.app.retrieval.hybrid import hybrid_search
@@ -259,15 +260,26 @@ def _format_evidence(chunks: list[dict[str, Any]]) -> str:
 
 
 async def _direct_finding(*, question: str, chunks: list[dict[str, Any]], llm: LLMProvider) -> str:
-    """The leaf case: one direct, non-recursive LLM call. No plan, no further tool access."""
+    """The leaf case: one direct, non-recursive LLM call. No plan, no further tool access.
+
+    The evidence batch is framed as untrusted data (`guardrails/injection.py`) exactly like
+    `agents/nodes/response.py`'s own evidence section: a sub-agent reads whatever a generated
+    search plan handed it, which can include an entire document's text, so the same defense
+    against a document carrying injection-shaped text applies here too.
+    """
     messages = [
         SystemMessage(
             content=(
                 "You are a sub-agent analyzing one batch of internal documents for a larger "
-                "research task. Answer the question below using only the evidence given."
+                "research task. Answer the question below using only the evidence given. "
+                f"{UNTRUSTED_CONTENT_INSTRUCTION}"
             )
         ),
-        HumanMessage(content=f"Question: {question}\n\nEvidence:\n{_format_evidence(chunks)}"),
+        HumanMessage(
+            content=(
+                f"Question: {question}\n\nEvidence:\n{frame_untrusted_content(_format_evidence(chunks))}"
+            )
+        ),
     ]
     try:
         result = await llm.astructured(messages, schema=SubAgentFinding, reasoning=True)

@@ -15,9 +15,12 @@ prompt — this module *is* that boundary. It enforces the role check **twice**,
    verified: a Viewer principal handed straight to `execute("python_analysis", ...)` denied
    right there, with no LLM or graph involved).
 
-Tool parameters are validated against each `ToolSpec`'s own Pydantic model before the handler
-ever runs — ASSESSMENT.md's "Validate: tool parameters" requirement — so a handler can assume
-well-typed input the same way a FastAPI route handler can.
+Tool parameters are validated twice before the handler ever runs — ASSESSMENT.md's "Validate:
+tool parameters" requirement: shape, against each `ToolSpec`'s own Pydantic model, so a handler
+can assume well-typed input the same way a FastAPI route handler can; then content, via
+`guardrails/validators.py::validate_tool_arguments`, screening every string value for the same
+injection patterns `guardrails/injection.py` applies to chat input — defense in depth against an
+argument that is well-typed but itself carries an injection payload.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from backend.app.core.errors import (
 )
 from backend.app.core.errors import ValidationFailedError as AppValidationFailedError
 from backend.app.core.security.rbac import Permission, Principal
+from backend.app.guardrails.validators import validate_tool_arguments
 
 logger = structlog.get_logger(__name__)
 
@@ -120,6 +124,9 @@ class ToolRegistry:
                 f"Invalid arguments for tool {name!r}.",
                 details={"tool": name, "errors": exc.errors()},
             ) from exc
+
+        # Content validation, independent of the shape check above — see the module docstring.
+        validate_tool_arguments(arguments)
 
         logger.info("tool_call_started", tool=name, role=principal.role.value)
         try:

@@ -230,3 +230,43 @@ recursive, concurrent-capable mechanism stays fully in place underneath the cons
 default. `Settings.rlm_plan_timeout_seconds` was raised from 90s to 180s to match: sequential
 execution of a full research turn (plan generation, search, up to four sequential sub-agent
 analyses, aggregation) measured 90–150s live on this hardware.
+
+---
+
+## 10. Prompt-injection detection: heuristics first, classifier only when ambiguous
+
+`docs/DELIVERY_PLAN.md` scopes Cycle 6's injection detection as "heuristics + classifier."
+Decided explicitly, at the user's request, rather than assumed: the deterministic heuristic
+filter (`guardrails/injection.py::heuristic_screen`) runs on every message and either confidently
+blocks (a known instruction-override, data-exfiltration, or tool-abuse pattern — zero LLM calls,
+zero added latency) or confidently allows. Only a message that trips a *weaker* signal — a
+sensitive-sounding word with no confident pattern match — escalates to one schema-constrained
+`qwen3:4b` classification call (`agents/nodes/guardrail.py`).
+
+**Why not classify every turn:** this hardware already treats the one local model as a scarce,
+easily-saturated resource — §3 and §9 above both exist because of it. Adding one more
+unconditional `qwen3:4b` call to every single turn, on top of the 8–15 already budgeted per
+question, would widen the latency this project already spends real effort bounding, for
+coverage the heuristic filter already provides on every attack shape this project's own
+acceptance test (`docs/DELIVERY_PLAN.md` criterion 5) actually exercises.
+
+**Why not heuristics alone:** a fixed pattern list cannot catch a paraphrased or novel attack
+that never matches a known shape. Reserving the classifier for exactly the messages the
+heuristics could not confidently decide — not the confident allows, not the confident blocks —
+spends the model's one extra call only where it adds real coverage, the same bound-the-scarce-
+resource reasoning §9 already applies to RLM sub-agent concurrency.
+
+**The classifier fails open, not closed**, when the LLM call itself errors (timeout, model
+unavailable): the residual risk at that point is a paraphrased attack the classifier might have
+caught, not a known one, since the heuristic filter already ran first. Every other non-
+authorization dependency in this system (Pinecone, MCP, the rerank budget) degrades the same
+way — continuing rather than blocking the user on an infrastructure hiccup — and authorization
+itself is never at stake here, since RBAC is enforced structurally (§6), not by this guardrail.
+
+**Where it runs:** as the graph's first node (`agents/nodes/guardrail.py`), not a check before
+`graph.astream()` is called, because `docs/DELIVERY_PLAN.md` criterion 5 requires a block to be
+"blocked and traced" — a check outside the graph would never appear in a LangSmith trace or the
+Agent Activity Panel, and the assessment explicitly wants the evaluator able to observe the
+decision, not just receive an HTTP error for it. A block is a raised `GuardrailViolationError`,
+reusing `api/v1/chat.py`'s existing mid-stream `AppError` handling rather than adding new
+plumbing for a new failure shape.

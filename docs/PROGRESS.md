@@ -78,15 +78,42 @@ the AST allowlist both attempts each time) — expected per `docs/DELIVERY_PLAN.
 register, and the fallback produced a correct, evidence-grounded final answer both times. 32 new
 tests (263 total, up from 213); `ruff`, `ruff format`, `mypy --strict` all pass clean.
 
-**Next action:** start **Cycle 6 — guardrails and validation** (`guardrails/injection.py`,
-`guardrails/validators.py`, `guardrails/citations.py`, `guardrails/brand.py`, and replacing
-`agents/nodes/validator.py`'s current structural-only check with real citation verification
-against retrieved chunk ids, plus the brand/injection guardrails). No external prerequisites are
-blocking Cycle 6. **Deferred, not blocking:** re-confirm live that a Viewer's identical
-spec-example research question still routes to `"retrieval"` (already confirmed once via curl in
-this cycle's own live verification — see the session log above) — the user asked to redo this
-specific check through the Streamlit UI once Cycle 7 builds it, purely as a nice-to-have, not a
-reason to reorder Cycle 6 ahead of or behind anything.
+Cycle 6 — guardrails and validation — is built and verified live end to end against real Ollama,
+Pinecone, Postgres, and the MCP server: a new `agents/nodes/guardrail.py`, the graph's entry
+point ahead of the Supervisor, screens every message with a deterministic heuristic filter
+(`guardrails/injection.py`) for the three attack shapes ASSESSMENT.md names, escalating to one
+schema-constrained `qwen3:4b` classifier call only when the heuristics are genuinely inconclusive
+— a design decision the user was asked about explicitly and chose over "classify every turn" or
+"heuristics only," recorded in full in `docs/DECISIONS.md` §10. `agents/nodes/validator.py`'s
+prior structural-only check is replaced by `_validate_answer`, layering real citation
+verification (`guardrails/citations.py` — does every bracketed `[Title]` match a chunk, tool
+result, or research finding actually present this turn?) and a brand/persona guardrail
+(`guardrails/brand.py` — persona breaks and system-prompt leaks) on top of the same structural
+checks. Retrieved evidence, tool output, and research findings are all framed as untrusted data
+(`guardrails/injection.py::frame_untrusted_content`, applied in both `agents/nodes/response.py`
+and `rlm/api.py`'s sub-agent prompts) — the second, independent injection channel a chat-endpoint
+heuristic cannot see at all, since a compromised document never passes through the endpoint.
+`guardrails/validators.py` adds shape validation for chat input (checked in `api/v1/chat.py`
+before the SSE stream opens) and content screening for tool arguments
+(`tools/registry.py::execute`, after the existing Pydantic shape check). Live verification
+confirmed: the acceptance test's literal injection attempt
+(`docs/DELIVERY_PLAN.md` criterion 5) is blocked for both an Analyst and a Viewer, visible in the
+Agent Activity Panel's event stream as a `guardrail` node block rather than silently dropped; an
+ambiguous message ("What is our password reset policy for new employees?") correctly escalated
+to the classifier, which returned "safe," and the turn proceeded through Supervisor → Retrieval
+→ Response → Validator exactly as before, with the new citation/brand checks passing cleanly on
+a real, correctly-cited answer; and a whitespace-only message was rejected with a clean 422
+before the graph ever ran. 47 new tests (310 total); `ruff`, `ruff format`, `mypy --strict` all
+pass clean.
+
+**Next action:** start **Cycle 7 — frontend, observability, docs** (Streamlit chat UI with the
+Agent Activity Panel consuming SSE, wiring `observability/langsmith.py`, and finishing
+`README.md` / the architecture diagram / `docs/ASSUMPTIONS_AND_TRADEOFFS.md`). No external
+prerequisites are blocking Cycle 7. **Deferred, not blocking:** re-confirm live, through the
+Streamlit UI once it exists, that a Viewer's identical spec-example research question still
+routes to `"retrieval"` (already confirmed twice via curl — Cycle 5's own live verification and
+again during Cycle 6 — see the session log) — a nice-to-have the user asked for, not a reason to
+reorder anything.
 
 ---
 
@@ -114,7 +141,7 @@ These are user-side actions. Full instructions in `docs/SETUP.md`.
 | 3 | LangGraph core, memory, streaming | 5h | ✅ done |
 | 4 | Tools and RBAC enforcement | 3h | ✅ done |
 | 5 | RLM research agent | 4h | ✅ done |
-| 6 | Guardrails and validation | 2.5h | ⬜ pending |
+| 6 | Guardrails and validation | 2.5h | ✅ done |
 | 7 | Frontend, observability, docs | 4h | ⬜ pending |
 
 Legend: ⬜ pending · 🟡 in progress · ✅ done
@@ -318,14 +345,47 @@ since the test environment has no `PINECONE_API_KEY`.
       evidence-grounded final answer that passed validation; the identical question from
       a Viewer routed to `"retrieval"` instead, confirming the RBAC gate holds
 
-### Cycle 6 — Guardrails and validation ⬜
+### Cycle 6 — Guardrails and validation ✅
 
-- [ ] Prompt-injection detection (heuristics + classifier)
-- [ ] Untrusted-data framing for retrieved content
-- [ ] Input + tool-parameter validation
-- [ ] Citation verification against retrieved chunk IDs
-- [ ] Commercial-bank brand/persona guardrail
-- [ ] Bounded validator retry loop with feedback
+- [x] Prompt-injection detection (heuristics + classifier) — `guardrails/injection.py`'s
+      deterministic `heuristic_screen` runs on every message; a genuinely ambiguous result (a
+      watchlist word, no confident pattern match) escalates to one schema-constrained `qwen3:4b`
+      classifier call in `agents/nodes/guardrail.py`, the graph's new entry point. A confident
+      match never reaches the LLM at all — the design choice (escalate-only-when-ambiguous, over
+      classifying every turn or skipping the classifier entirely) was put to the user explicitly
+      and is recorded in `docs/DECISIONS.md` §10
+- [x] Untrusted-data framing for retrieved content — `guardrails/injection.py::
+      frame_untrusted_content` wraps every evidence section (`agents/nodes/response.py`'s
+      Evidence/Tool result/Research findings, `rlm/api.py`'s sub-agent evidence) in explicit
+      `<untrusted_data>` delimiters, paired with `UNTRUSTED_CONTENT_INSTRUCTION` in the system
+      prompt — the defense against a compromised *document* carrying injection-shaped text,
+      which a chat-endpoint heuristic can never see
+- [x] Input + tool-parameter validation — `guardrails/validators.py::validate_user_message`
+      (whitespace-only, control characters, pathological repetition; checked in
+      `api/v1/chat.py` before the SSE stream opens) and `validate_tool_arguments` (recursive
+      injection screen over every string value in a tool call's arguments, checked in
+      `tools/registry.py::execute` right after the existing Pydantic shape validation)
+- [x] Citation verification against retrieved chunk IDs — `guardrails/citations.py::
+      verify_citations` flags any bracketed `[Title]` that names neither a retrieved chunk's
+      title nor a tool/research evidence channel actually present that turn, replacing the
+      "cited if evidenced" structural-only check `agents/nodes/validator.py` shipped in Cycle 3
+- [x] Commercial-bank brand/persona guardrail — `guardrails/brand.py::check_brand_violation`
+      catches a generic "as an AI language model" persona break and a verbatim system-prompt
+      echo, both via plain pattern/string matching rather than a second LLM judgment call
+- [x] Bounded validator retry loop with feedback — unchanged in shape from Cycle 3
+      (`agents/graph.py::_make_after_validator`); `_validate_answer`'s new checks simply feed
+      richer feedback into the same loop
+- [x] `tests/guardrails/` (injection, validators, citations, brand — 4 new modules),
+      `tests/agents/nodes/test_validator.py` rewritten for `_validate_answer`, a new
+      `TestBuildGraph` case in `tests/agents/test_graph.py` pinning the guardrail node's position
+      in the compiled topology, and a new registry test for the tool-argument content screen —
+      47 new tests (310 total); `ruff`, `ruff format`, `mypy --strict` all pass clean
+- [x] Live end to end against real Ollama/Pinecone/Postgres/MCP: the acceptance test's literal
+      injection attempt blocked for both an Analyst and a Viewer, visible in the Agent Activity
+      Panel's event stream as a `guardrail` node block; an ambiguous message correctly escalated
+      to the classifier (returned "safe") and completed a normal `"retrieval"` turn whose answer
+      passed the new citation/brand checks cleanly; a whitespace-only message rejected with a
+      clean 422 before the graph ran at all
 
 ### Cycle 7 — Frontend, observability, docs ⬜
 
@@ -355,6 +415,37 @@ From `ASSESSMENT.md`. Tracked separately because these are graded independently 
 
 Newest first. One line per meaningful change.
 
+- **2026-09-06** — Built and verified Cycle 6 (guardrails and validation) live end to end against
+  real Ollama, Pinecone, Postgres, and the MCP server (all four restarted fresh this session —
+  Docker Desktop needed a manual start first). Before building, asked the user to choose how the
+  spec's "heuristics + classifier" injection detection should actually run, since this
+  hardware already treats one extra `qwen3:4b` call per turn as a real, non-trivial cost
+  (`docs/DECISIONS.md` §3, §9): the user chose escalating to the classifier only when the
+  deterministic heuristic filter is genuinely inconclusive, over classifying every turn or
+  skipping the classifier entirely — recorded as a load-bearing decision in a new
+  `docs/DECISIONS.md` §10 rather than assumed. Built `agents/nodes/guardrail.py` as the graph's
+  new entry point (ahead of the Supervisor) specifically so a block is visible in a LangSmith
+  trace and the Agent Activity Panel — `docs/DELIVERY_PLAN.md` criterion 5 requires an injection
+  attempt to be "blocked *and traced*," which a check outside `graph.astream()` could never
+  satisfy. Replaced `agents/nodes/validator.py`'s Cycle 3 structural-only check with
+  `_validate_answer`, adding real citation verification (`guardrails/citations.py`) and a
+  brand/persona guardrail (`guardrails/brand.py`) as plain pattern/string checks rather than a
+  second LLM judgment call, consistent with this project's running skepticism of the 4B model as
+  a reliable judge of anything nuanced. Applied `frame_untrusted_content`'s untrusted-data
+  delimiter to every evidence channel in both `agents/nodes/response.py` and `rlm/api.py`'s
+  sub-agent prompts — the second, independent injection channel (a compromised retrieved
+  document) that no chat-endpoint heuristic can ever see, since the injected text never passes
+  through the endpoint at all. Live verification confirmed all three layers work together
+  without regressing the existing graph: the acceptance test's literal injection attempt
+  (`docs/DELIVERY_PLAN.md` criterion 5) was blocked for both an Analyst and a Viewer, each
+  visible in the SSE event stream as a `guardrail` node block; an ambiguous message ("What is our
+  password reset policy for new employees?") correctly escalated to the classifier (~5.5s), which
+  returned "safe," and the turn then completed a normal Supervisor → Retrieval → Response →
+  Validator run whose real, correctly-cited answer passed the new citation and brand checks
+  cleanly on the first attempt (no retry needed); and a whitespace-only message was rejected with
+  a clean 422 before the graph ever ran, distinct from the graph-level injection block. No
+  regressions found in the 263 pre-existing tests. 47 new tests (310 total); `ruff`,
+  `ruff format`, `mypy --strict` all pass clean.
 - **2026-09-05** — Built and verified Cycle 5 (RLM research agent) live end to end against
   real Ollama, Pinecone, and Postgres. Two consequential, non-obvious findings surfaced by
   live verification (not caught by 32 new passing unit tests, `ruff`, or `mypy --strict` —

@@ -1,11 +1,18 @@
-"""Validator node: this cycle's structural check on the Response node's draft, and the exit
-condition for the bounded Validator -> Response retry loop.
+"""Validator node: verifies the Response node's draft against real evidence and brand rules, and
+is the exit condition for the bounded Validator -> Response retry loop.
 
-Only a structural check today — non-empty, and cited if evidence was retrieved. Cycle 6 replaces
-`_validate_structurally` with real citation verification against retrieved chunk ids and the
-brand/injection guardrails (`docs/ARCHITECTURE.md`'s Security and guardrails criterion); this
-node's shape — a pure check feeding a pass/fail decision — does not change, only what the check
-looks at.
+Cycle 3 shipped a structural-only check (non-empty, cited-if-evidenced). Cycle 6 replaces that
+with `_validate_answer`, layering two real guardrail checks on top of the same structural ones:
+
+- **Citation verification** (`guardrails/citations.py`) — does every bracketed `[Title]` marker
+  in the draft correspond to a chunk this turn actually retrieved, or a real tool/research
+  result, rather than a title the model fabricated to look well-sourced?
+- **Brand/persona check** (`guardrails/brand.py`) — does the draft stay in character as this
+  bank's own assistant, and does it avoid echoing the system prompt back to the user?
+
+The node's shape is unchanged from Cycle 3: a pure check feeding a pass/fail decision, feeding
+the same bounded retry loop, with feedback fed back into the Response node's next attempt
+(`response.py::_build_system_prompt`'s `validation_feedback` branch).
 
 The retry loop is bounded by `settings.max_validator_retries`
 (`docs/ARCHITECTURE.md`'s "bounded validator->response retry loop"): once exhausted, this node
@@ -24,22 +31,53 @@ from langgraph.config import get_stream_writer
 from langgraph.runtime import Runtime
 
 from backend.app.agents.context import GraphContext
+from backend.app.agents.nodes.response import SYSTEM_PROMPT
 from backend.app.agents.state import AgentState
+from backend.app.guardrails.brand import check_brand_violation
+from backend.app.guardrails.citations import verify_citations
 from backend.app.observability.events import ActivityEvent, ActivityEventType
+from backend.app.retrieval.models import RetrievedChunk
 
 logger = structlog.get_logger(__name__)
 
 _UNVALIDATED_CAVEAT = "\n\n*(This answer could not be fully validated — treat it with extra care.)*"
 
 
-def _validate_structurally(*, answer: str, had_evidence: bool) -> str | None:
-    """Returns `None` if `answer` passes, else a feedback string explaining why it did not.
-    Pure and synchronous — unit-testable with no graph, LLM, or state involved."""
+def _validate_answer(
+    *,
+    answer: str,
+    retrieved_chunks: list[RetrievedChunk],
+    tool_output: str | None,
+    research_output: str | None,
+) -> str | None:
+    """Returns `None` if `answer` passes every check, else feedback explaining the first one it
+    failed. Pure and synchronous — unit-testable with no graph, LLM, or state involved.
+
+    Checks run cheapest/most-certain first, so the Response node's revision prompt always names
+    one concrete, actionable problem rather than the last of several unrelated ones: empty ->
+    missing citation entirely -> a citation naming something that was never retrieved ->
+    breaking persona or leaking the system prompt.
+    """
     if not answer.strip():
         return "The answer was empty."
+
+    had_evidence = bool(retrieved_chunks)
     if had_evidence and "[" not in answer:
         return "Evidence was retrieved but the answer includes no bracketed citation."
-    return None
+
+    hallucinated = verify_citations(
+        answer=answer,
+        retrieved_chunks=retrieved_chunks,
+        tool_output=tool_output,
+        research_output=research_output,
+    )
+    if hallucinated:
+        return (
+            f"The answer cites {hallucinated!r}, which does not match any document, tool "
+            "result, or research finding actually retrieved this turn."
+        )
+
+    return check_brand_violation(answer, SYSTEM_PROMPT)
 
 
 async def validator_node(state: AgentState, runtime: Runtime[GraphContext]) -> dict[str, Any]:
@@ -53,8 +91,12 @@ async def validator_node(state: AgentState, runtime: Runtime[GraphContext]) -> d
     )
 
     answer = state.get("draft_answer", "")
-    had_evidence = bool(state.get("retrieved_chunks"))
-    feedback = _validate_structurally(answer=answer, had_evidence=had_evidence)
+    feedback = _validate_answer(
+        answer=answer,
+        retrieved_chunks=state.get("retrieved_chunks", []),
+        tool_output=state.get("tool_output"),
+        research_output=state.get("research_output"),
+    )
     passed = feedback is None
 
     writer(

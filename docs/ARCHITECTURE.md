@@ -23,6 +23,7 @@ graph TB
     end
 
     subgraph Graph["LangGraph orchestration"]
+        GRD[Guardrail<br/>injection screen]
         SUP[Supervisor<br/>intent + routing]
         RET[Retrieval agent<br/>single-hop RAG]
         TLS[Tools node<br/>RBAC-gated tool call]
@@ -45,7 +46,8 @@ graph TB
         LS[LangSmith]
     end
 
-    UI -->|HTTP + SSE| AUTH --> RL --> SUP
+    UI -->|HTTP + SSE| AUTH --> RL --> GRD
+    GRD --> SUP
     SUP --> RET
     SUP --> TLS
     SUP --> RES
@@ -76,6 +78,13 @@ per `docs/DECISIONS.md` §9). `TLS` is the one node that ever calls into `Tools`
 arrow leaving `Tools` toward `External` passes through `tools/registry.py`'s execution-boundary
 RBAC check first — see
 `docs/DECISIONS.md` §6.
+
+`GRD` (Cycle 6) is the graph's entry point, ahead of `SUP` — every turn passes through the
+prompt-injection screen before intent classification even runs. It has no conditional edge of
+its own: a block raises `GuardrailViolationError` rather than routing anywhere, caught by
+`api/v1/chat.py`'s existing mid-stream `AppError` handling. See `docs/DECISIONS.md` §10 and
+`agents/nodes/guardrail.py`'s module docstring for why this lives inside the graph rather than
+as a check before `graph.astream()` is called.
 
 ---
 
@@ -116,6 +125,7 @@ enterprise-ai-assistant/
 │   │   ├── graph.py                 # graph assembly + checkpointer wiring
 │   │   ├── state.py                 # typed AgentState + merge reducers
 │   │   └── nodes/
+│   │       ├── guardrail.py         # prompt-injection screen, the graph's entry point (Cycle 6)
 │   │       ├── supervisor.py        # intent classification, task decomposition, routing
 │   │       ├── retrieval.py         # single-hop RAG
 │   │       ├── tools.py             # RBAC-gated tool selection + execution (Cycle 4)
@@ -168,29 +178,45 @@ enterprise-ai-assistant/
 2. **Auth** resolves the token into a `Principal` (user id + role) and binds it to request-scoped
    context. Everything downstream reads authorization from here, never from model output.
 3. **Rate limiting** consumes a token from that user's bucket; exhaustion returns a graceful 429.
+3a. **Input shape validation** (`guardrails/validators.py::validate_user_message`, Cycle 6) rejects
+   a well-typed but malformed message (whitespace-only, control characters, pathological
+   repetition) with a plain 422 before the SSE stream even opens — distinct from prompt-injection
+   screening, which runs inside the graph (step 5) so it can be traced.
 4. **Graph invocation** resumes the session thread from the Postgres checkpointer, so prior turns
    are already present.
-5. **Supervisor** classifies intent with schema-constrained output and routes to Retrieval
+5. **Guardrail** (Cycle 6, the graph's entry point) screens the latest message with a
+   deterministic heuristic filter, escalating to one schema-constrained classifier call only when
+   the heuristics are genuinely inconclusive (`docs/DECISIONS.md` §10). A block raises
+   `GuardrailViolationError`, surfaced to the client as one more SSE event by the same mid-stream
+   `AppError` handling every other graph failure already uses.
+6. **Supervisor** classifies intent with schema-constrained output and routes to Retrieval
    (single-hop), Tools (a specific RBAC-gated lookup), or Research (multi-hop RLM) — the prompt
    only ever names the tool *categories* this principal's role actually has, read from the same
    `ToolRegistry` the Tools node enforces against (`agents/nodes/supervisor.py`).
-6. **Retrieval** issues dense and sparse queries concurrently, fuses with RRF, optionally reranks once,
+7. **Retrieval** issues dense and sparse queries concurrently, fuses with RRF, optionally reranks once,
    and returns attributed chunks. The `access_level` filter is derived from the principal's role.
-6a. **Tools** (Cycle 4), when routed, chooses one tool from those this principal's role offers
+7a. **Tools** (Cycle 4), when routed, chooses one tool from those this principal's role offers
    (a second, independent RBAC check happens at `tools/registry.py::execute`, not only here),
-   fills in that tool's own parameter schema, and executes it — `knowledge_search`,
-   `python_analysis` (on the same sandbox Research uses), or an MCP-backed lookup (employee
-   directory, service catalog, incident records). Every outcome, including a denial or a tool
-   failure, becomes a plain-English `tool_output` the Response node relays.
-7. **Research**, when routed, generates a Python search plan, validates it against the AST allowlist,
+   fills in that tool's own parameter schema — screened for injection content
+   (`guardrails/validators.py::validate_tool_arguments`, Cycle 6) before the handler runs — and
+   executes it: `knowledge_search`, `python_analysis` (on the same sandbox Research uses), or an
+   MCP-backed lookup (employee directory, service catalog, incident records). Every outcome,
+   including a denial or a tool failure, becomes a plain-English `tool_output` the Response node
+   relays.
+8. **Research**, when routed, generates a Python search plan, validates it against the AST allowlist,
    executes it in the sandbox, fans out to recursive sub-agents under a bounded semaphore, and aggregates.
-8. **Response** composes the answer from retrieved evidence (and any tool output) with inline citations.
-9. **Validator** verifies every citation against retrieved chunk IDs and applies brand and safety
-   guardrails. Failure loops back to Response with feedback, bounded by a retry cap.
-10. **Streaming** — throughout, typed activity events (node entered, tool called, retrieval status,
+9. **Response** composes the answer from retrieved evidence (and any tool output) with inline
+   citations. Every evidence section is framed as untrusted data
+   (`guardrails/injection.py::frame_untrusted_content`, Cycle 6), since a retrieved document can
+   itself carry text shaped like an instruction.
+10. **Validator** verifies every citation against the chunks, tool result, or research finding
+    actually present this turn (`guardrails/citations.py`) and applies the brand/persona
+    guardrail (`guardrails/brand.py`). Failure loops back to Response with feedback, bounded by a
+    retry cap.
+11. **Streaming** — throughout, typed activity events (node entered, tool called, retrieval status,
     memory update, validation result) are emitted over SSE alongside answer tokens, driving the
     Agent Activity Panel.
-11. **Tracing** — the whole run, including agent transitions, tool calls and retrieval operations,
+12. **Tracing** — the whole run, including agent transitions, tool calls and retrieval operations,
     is recorded to LangSmith.
 
 ---
@@ -234,9 +260,21 @@ fixed, hand-written deterministic plan rather than failing the turn.
 
 ### Security and guardrails — 10%
 
-Layered, with authorization deliberately outside the model — see `docs/DECISIONS.md` §6. Retrieved
-content is framed as untrusted data. Citations are verified against retrieved chunk IDs before an
-answer is released, so hallucinated attribution fails validation rather than reaching the user.
+Layered, with authorization deliberately outside the model — see `docs/DECISIONS.md` §6.
+Prompt injection is screened at the graph's entry point (`agents/nodes/guardrail.py`): a
+deterministic heuristic filter for the three attack shapes ASSESSMENT.md names (instruction
+override, data exfiltration, tool abuse), escalating to a schema-constrained classifier call
+only when the heuristics are inconclusive (`docs/DECISIONS.md` §10). Retrieved content, tool
+results and research findings are all framed as untrusted data
+(`guardrails/injection.py::frame_untrusted_content`) — a compromised document is a second
+injection channel a chat-endpoint screen cannot see at all. Citations are verified against the
+chunks, tool result, and research finding actually present that turn
+(`guardrails/citations.py`) before an answer is released, so hallucinated attribution fails
+validation rather than reaching the user. A brand/persona guardrail (`guardrails/brand.py`)
+catches a draft that breaks the bank-assistant persona or echoes the system prompt back
+verbatim. Input and tool-parameter validation (`guardrails/validators.py`) reject malformed
+chat messages and tool arguments that carry an injection payload, independent of shape
+validation the request/tool schemas already perform.
 
 ### RBAC — 5%
 
@@ -276,3 +314,6 @@ necessary exception — `exec()` is inherently synchronous — and is run on a w
 | RLM plan fails validation | Deterministic fallback plan executes instead |
 | RLM sandbox exceeds its wall-clock budget, or every fallback attempt still fails | Research node catches the typed error and folds a plain-English explanation into `research_output`; the turn still completes rather than failing outright |
 | Rate limit exceeded | Graceful 429 with retry-after |
+| Prompt-injection heuristic match | Turn blocked at the graph's entry point (`agents/nodes/guardrail.py`), surfaced as an SSE error event and a LangSmith-traced run rather than a silent drop |
+| Injection classifier call fails (LLM unavailable) on an ambiguous message | Fails open — the heuristic filter already ruled out every confident attack pattern, so this degrades like any other non-authorization dependency rather than blocking the user on an infrastructure hiccup (`docs/DECISIONS.md` §10) |
+| Validator finds a hallucinated citation or a brand/persona violation | Same bounded Validator -> Response retry loop as a structural failure, with the specific violation fed back as revision feedback |

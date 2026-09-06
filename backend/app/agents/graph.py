@@ -1,12 +1,17 @@
-r"""LangGraph assembly: wires the Cycle 3 nodes plus Cycle 4's Tools node into one compiled,
-checkpointed graph.
+r"""LangGraph assembly: wires the Cycle 3 nodes, Cycle 4's Tools node, and Cycle 6's Guardrail
+node into one compiled, checkpointed graph.
 
 ```
-START -> supervisor --route=retrieval--> retrieval -> response -> validator --pass/exhausted--> END
-              |--route=direct-----------------------> response -----^          \--retry--> response
-              |--route=tools----------> tools -------> response -----^
-              \--route=research-------> research -----> response ----^
+START -> guardrail -> supervisor --route=retrieval--> retrieval -> response -> validator --pass/exhausted--> END
+    (raises to block)      |--route=direct-----------------------> response -----^          \--retry--> response
+                           |--route=tools----------> tools -------> response -----^
+                           \--route=research-------> research -----> response ----^
 ```
+
+`guardrail` (Cycle 6) never has a conditional edge of its own: a block is a raised
+`GuardrailViolationError`, not a routed state, so the only edge leaving it is the unconditional
+one to `supervisor` — see `agents/nodes/guardrail.py`'s module docstring for why an exception,
+not a route, is the right shape here.
 
 The `"research"` route (Cycle 5) was additive to this topology, not a rewrite of it — the
 conditional-edge function below only needed one more entry in `_SUPERVISOR_ROUTES`, since
@@ -29,6 +34,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from backend.app.agents.context import GraphContext
+from backend.app.agents.nodes.guardrail import guardrail_node
 from backend.app.agents.nodes.research import research_node
 from backend.app.agents.nodes.response import response_node
 from backend.app.agents.nodes.retrieval import retrieval_node
@@ -71,6 +77,7 @@ def build_graph(
         AgentState, context_schema=GraphContext
     )
 
+    graph.add_node("guardrail", guardrail_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("retrieval", retrieval_node)
     graph.add_node("tools", tools_node)
@@ -78,7 +85,8 @@ def build_graph(
     graph.add_node("response", response_node)
     graph.add_node("validator", validator_node)
 
-    graph.add_edge(START, "supervisor")
+    graph.add_edge(START, "guardrail")
+    graph.add_edge("guardrail", "supervisor")
     graph.add_conditional_edges(
         "supervisor",
         _after_supervisor,
