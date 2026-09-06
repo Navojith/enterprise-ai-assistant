@@ -35,6 +35,7 @@ from backend.app.rlm.api import (
     build_search,
     build_sub_agent,
     build_sub_agents,
+    count_by_month,
     filter_chunks,
     group_by_document,
 )
@@ -289,6 +290,53 @@ class TestGroupByDocument:
         assert group_by_document([]) == []
 
 
+class TestCountByMonth:
+    def test_counts_distinct_documents_per_month(self) -> None:
+        chunks = [
+            {"document_id": "inc-1", "created_date": "2025-09-05"},
+            {
+                "document_id": "inc-1",
+                "created_date": "2025-09-05",
+            },  # same incident, another section
+            {"document_id": "inc-2", "created_date": "2025-09-20"},
+            {"document_id": "inc-3", "created_date": "2025-10-01"},
+        ]
+
+        assert count_by_month(chunks) == {"2025-09": 2, "2025-10": 1}
+
+    def test_does_not_over_count_a_single_documents_repeated_sections(self) -> None:
+        """One incident is chunked into several sections (Summary, Root Cause, Timeline, ...),
+        each carrying the same `created_date` — counting chunks directly would over-count every
+        incident by its section count."""
+        chunks = [
+            {"document_id": "inc-1", "created_date": "2025-09-05"}
+            for _ in range(4)  # 4 sections of the same incident
+        ]
+
+        assert count_by_month(chunks) == {"2025-09": 1}
+
+    def test_result_is_sorted_chronologically(self) -> None:
+        chunks = [
+            {"document_id": "inc-3", "created_date": "2026-01-01"},
+            {"document_id": "inc-1", "created_date": "2025-09-05"},
+            {"document_id": "inc-2", "created_date": "2025-12-01"},
+        ]
+
+        assert list(count_by_month(chunks).keys()) == ["2025-09", "2025-12", "2026-01"]
+
+    def test_a_chunk_with_no_created_date_is_skipped_rather_than_corrupting_a_bucket(self) -> None:
+        chunks = [
+            {"document_id": "inc-1", "created_date": "2025-09-05"},
+            {"document_id": "inc-2", "created_date": ""},
+            {"document_id": "inc-3"},
+        ]
+
+        assert count_by_month(chunks) == {"2025-09": 1}
+
+    def test_empty_input_produces_an_empty_result(self) -> None:
+        assert count_by_month([]) == {}
+
+
 class TestRLMBudget:
     def test_reserves_up_to_the_limit_then_refuses(self) -> None:
         budget = RLMBudget(max_depth=2, max_total_sub_agent_calls=2)
@@ -391,6 +439,50 @@ class TestSyncAsyncBridge:
         scoped_calls = [c for c in calls if c["namespaces"]]
         assert scoped_calls and all(c["namespaces"] == ["payments"] for c in scoped_calls)
         assert any(c["namespaces"] is None for c in calls)  # the all-department search too
+
+    async def test_a_full_scoped_list_no_longer_crowds_out_every_unscoped_hit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 29, the exact live-verified regression:
+        `hybrid_search` never returns "no good match" for a namespace, only its nearest
+        neighbors — so a *wrong* department guess still fills all `top_k` scoped slots with
+        irrelevant chunks. Before this fix, `merge_prioritizing_scoped(scoped, unscoped,
+        top_k=top_k)` kept every one of those `top_k` (irrelevant) scoped hits unconditionally,
+        leaving zero merge budget for the (correct, but different-department) unscoped result —
+        strictly worse than running no department-scoping at all. The merge budget is now
+        `top_k * 2` (matching `agents/nodes/retrieval.py`'s already-proven `_MERGED_TOP_K`), so a
+        fully-padded, wrong-department scoped list can no longer displace unscoped hits."""
+        requested_top_k = 5
+        scoped_chunks = [
+            _chunk(f"scoped::{i}", department="product") for i in range(requested_top_k)
+        ]
+        unscoped_chunks = [
+            _chunk(f"unscoped::{i}", department="payments") for i in range(requested_top_k)
+        ]
+
+        async def _fake_hybrid_search(
+            store: object,
+            *,
+            query_text: str,
+            role: str,
+            top_k: int,
+            namespaces: list[str] | None = None,
+        ) -> list[RetrievedChunk]:
+            return list(scoped_chunks) if namespaces else list(unscoped_chunks)
+
+        monkeypatch.setattr(api, "hybrid_search", _fake_hybrid_search)
+        context = _context(department="product")
+
+        outcome = await run_sandboxed(
+            f"result = search('payment incidents per month last year', top_k={requested_top_k})",
+            injected_globals=build_rlm_globals(context),
+            timeout_seconds=2.0,
+        )
+
+        result_ids = {c["chunk_id"] for c in outcome.result}
+        assert result_ids == {c.chunk_id for c in [*scoped_chunks, *unscoped_chunks]}
+        # Every genuinely relevant (unscoped) hit survived, not just the wrong-department ones.
+        assert all(f"unscoped::{i}" in result_ids for i in range(requested_top_k))
 
     async def test_search_without_a_department_never_scopes_by_namespace(
         self, monkeypatch: pytest.MonkeyPatch

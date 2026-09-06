@@ -495,6 +495,50 @@ mechanism) rather than requiring any new paid service.
 
 Newest first. One line per meaningful change.
 
+- **2026-09-06** — Fixed a user-reported bad "research"-route answer ("Run a Python analysis to
+  count how many payment incidents happened per month last year?" as an Analyst, answered "no
+  payment incidents were recorded for any month last year") by reproducing it live against real
+  Pinecone rather than guessing, per the LangSmith trace the user provided. Found two independent,
+  compounding problems, presented both to the user with concrete fix options and a recommendation
+  rather than picked unilaterally, and implemented what the user chose. **Problem 1**: the
+  Supervisor guessed the wrong department (`product` instead of `payments` — the corpus's
+  "Instant Payments Feature Specification" lives under `product`), and `rlm/api.py::build_search`'s
+  merge budget (`top_k`, not doubled like `agents/nodes/retrieval.py`'s `_MERGED_TOP_K`) let that
+  wrong guess's fully-padded scoped result crowd out 100% of the correct all-department result —
+  live-verified strictly worse than no department-scoping at all. Fixed by widening the merge
+  budget to `top_k * 2` (matching `retrieval_node`'s already-proven pattern) — the user chose this
+  over a narrower, `top_k`-preserving quota fix after live testing showed the narrower option
+  would not have recovered this specific case (the real evidence was buried too deep, rank ~18-38
+  of a fully-ranked corpus). Also tightened the Supervisor's routing prompt to reduce this specific
+  department/keyword confusion. **Problem 2**, fixed alongside at the user's request: `aggregate()`
+  is one LLM call producing prose, never a computed count, so nothing in the RLM path could answer
+  a counting question numerically even with correct retrieval. Added `count_by_month(chunks) ->
+  dict[str, int]` to the curated RLM API (counts distinct documents, not chunks, per month) and
+  taught `rlm/planner.py`'s system prompt to use it (or plain Python counting) for tally-style
+  questions instead of trusting `aggregate()` to state a number — and fixed a related bug the same
+  work surfaced: `agents/nodes/research.py::_stringify_research_result` only ever rendered a
+  result's `summary`/`recurring_themes` keys, so a plan's computed count would have been silently
+  dropped from the final answer; now renders any other populated key too. Both changes documented
+  in full, including the rejected RRF-merge alternative and its measurements, in
+  `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 29 and `docs/DECISIONS.md` §9 (a fourth addition).
+  Honestly disclosed, not silently left implied: `deterministic_fallback_plan` — which fires on
+  most live research turns per trade-off 28 — is one fixed, question-agnostic template with no
+  counting logic, so a counting question that falls through to it still gets a prose estimate, not
+  a number, until the model's own generated code succeeds. 8 new/updated tests (381 total, up from
+  373 — `count_by_month`'s bucketing/dedup/malformed-input behavior, the exact crowding-regression
+  shape via a new `build_search` test, and `_stringify_research_result`'s extra-field rendering);
+  `ruff`, `ruff format`, `mypy --strict` all pass clean. Live-verified against real Ollama and
+  Pinecone (`execute_research` called directly with the user's exact question, `get_stream_writer`
+  stubbed since this ran outside a graph invocation): with the department forced back to the
+  original trace's exact wrong guess (`"product"`), the model's own generated plan spontaneously
+  used `count_by_month` on the first attempt and returned a real computed tally (6 incidents
+  across 5 months) — a complete change in kind from "no payment incidents were recorded." Repeating
+  with the correct department (`"payments"`) returned a materially more complete tally summing to
+  13 — the corpus's actual full count — confirming the fix's real benefit (wrong guess: zero →
+  substantial evidence) and its honest limit (wrong guess: still not as complete as a correct one,
+  since the underlying cross-department RRF dilution is mitigated, not eliminated). Also found,
+  and disclosed rather than fixed this pass: neither generated plan restricted to "last year" —
+  there is no date-range filter in the curated API yet, only whole-corpus monthly bucketing.
 - **2026-09-06** — Committed and pushed the previous entry's `aggregate()` completeness-check
   fix (`3f47fa5` on `fix/retrieval-context-and-corpus-content`) and rebuilt/redeployed the
   `backend`/`frontend`/`mcp_server` Docker images from it; all four containers confirmed healthy

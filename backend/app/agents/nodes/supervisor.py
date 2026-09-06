@@ -59,6 +59,16 @@ fix's first version, and was itself found live to be a regression, since a 4B mo
 guess is not reliably grounded and a wrong guess made the correct document unreachable rather
 than merely diluted. `retrieval_node` never excludes other departments on the strength of this
 field alone; it only prioritizes.
+
+Live testing (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 29) found a further, more subtle
+way this guess goes wrong: a question about "payment incidents" got guessed department=`product`
+rather than `payments`, because the corpus files an *"Instant Payments Feature Specification"*
+under the product department — the model conflated a document's topic with the team that owns
+it. `_SYSTEM_PROMPT_TEMPLATE` now says explicitly that keyword overlap with a department's name
+is not the same as being about that department. That trade-off's real fix, though, is on the
+consuming side: `retrieval/hybrid.py::merge_prioritizing_scoped` no longer lets a wrong guess
+crowd out the all-department search's own results, so a guess this prompt tweak still gets
+wrong is safe rather than merely less likely.
 """
 
 from __future__ import annotations
@@ -96,8 +106,12 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "makes sense with no other context. If the latest message already stands alone, or the "
     "route does not need a search query, repeat it unchanged. Finally, name the one department "
     "({departments}) this question is about, if it is clearly about one — a question naming a "
-    "specific system, document, or team usually is. Answer 'unclear' if it could span more "
-    "than one department or the department cannot be told from the conversation."
+    "specific system, document, or team usually is. A question merely containing a word similar "
+    "to a department's name is not the same as being about that department — a feature or "
+    "incident involving payments could be owned by the product, security, or core banking team "
+    "rather than the payments department itself; judge by which team owns the system or process "
+    "involved, not by keyword overlap with the department name. Answer 'unclear' if it could "
+    "span more than one department or the department cannot be told from the conversation."
 )
 
 # Only ever appended when this principal holds `Permission.ANALYTICS_TOOLS` — see the module

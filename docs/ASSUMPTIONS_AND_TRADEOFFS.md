@@ -1322,3 +1322,123 @@ works — can see or recover it.
   unit tests — but a degraded draw at the sub-agent or Response stage, or an internally
   inconsistent conclusion the aggregated summary reaches despite complete evidence (also
   observed live — see the addendum), is not covered by this or any other check in the pipeline.
+- **The deterministic fallback plan cannot compute a numeric answer, only a prose one.**
+  Trade-off 29's second gap: `count_by_month` and prompt guidance let the *model's own generated*
+  plan compute a real tally when it chooses to, but `deterministic_fallback_plan` is one fixed,
+  question-agnostic template (`search` → `group_by_document` → `sub_agents` → `aggregate`) that
+  never calls `count_by_month` or writes ad hoc counting code — and per trade-off 28's own
+  finding, the fallback fires on the *majority* of live research turns (the 4B model's generated
+  code has failed AST validation on most live-verified attempts). A "count X per month"
+  question that falls through to the fallback still only gets `aggregate()`'s eyeballed prose
+  estimate, not a computed number. Left unfixed deliberately rather than adding question-shape
+  detection to a template meant to stay generic across every kind of research question.
+
+### 29. A user-reported bad "research"-route answer traced to a retrieval-crowding regression, plus a real missing capability (numeric counting)
+
+A user asked, as an Analyst, "Run a Python analysis to count how many payment incidents happened
+per month last year?" and got a confidently wrong answer ("no payment incidents were recorded for
+any month last year"), captured in a LangSmith trace. Reproduced live against real Pinecone rather
+than guessed at, this traced to two independent, compounding problems, not one.
+
+**Problem 1: the Supervisor's department guess was wrong, and the merge that was supposed to make
+a wrong guess *safe* (trade-off 26) instead made it worse than no scoping at all.** The Supervisor
+guessed `search_department="product"` for a question about "payment incidents" — plausibly
+because the corpus's *"Instant Payments Feature Specification"* is filed under the `product`
+department, conflating a document's topic with the team that owns it. Calling
+`rlm/api.py::build_search`'s exact logic directly against live Pinecone confirmed the real
+consequence: a department-scoped `hybrid_search` never returns "no good match" for a namespace,
+only its nearest neighbors, so the wrong-department (`product`) search still filled all `top_k`
+slots with irrelevant chunks; the plain all-department search, run alongside it, found exactly one
+genuine `payments`-department chunk in its own top `top_k` (the rest were buried by RRF dilution
+across all 6 departments — the exact mechanism trade-off 26 already names); and
+`merge_prioritizing_scoped(scoped, unscoped, top_k=top_k)` — the call this module actually made —
+kept every one of the 20 wrong-department chunks unconditionally, per its own "keep every scoped
+hit" contract, leaving zero merge budget for the one real chunk the unscoped search had found.
+**The result was strictly worse than running no department-scoping at all**, which would at least
+have kept that one chunk.
+
+A more sophisticated merge (fusing scoped and unscoped via RRF instead of "keep all scoped, fill
+the rest") was tried and measured, live, before being rejected: it still returned zero relevant
+chunks for this exact case, because the genuine `payments` chunks were buried too deep (rank
+~18–38 out of a ~224-chunk corpus already fully ranked by `hybrid_search`'s own
+`candidates_per_source` fan-out) for any *merge strategy* to recover once the guess was wrong —
+only a bigger merge *budget* could.
+
+**The fix, put to the user as an explicit choice given the trade-offs (rather than picked
+unilaterally): mirror `agents/nodes/retrieval.py`'s already-proven `_MERGED_TOP_K = _TOP_K * 2`**
+— give `rlm/api.py::build_search`'s merge a budget of `top_k * 2` (the sum of both full lists,
+dropping nothing but genuine duplicates) instead of `top_k` alone. This module previously kept the
+smaller, un-doubled budget specifically to avoid growing a plan's own `search()` result count (and
+so its downstream `batch`/`group_by_document`/`sub_agents` call count and `RLMBudget` spend) —
+correct as far as it went, but the live reproduction showed that economy cost strictly more than
+it saved: a wrong guess turned a recoverable dilution problem into a total blackout. The user chose
+to accept the doubled-candidate-count trade-off (rather than a narrower, `top_k`-preserving fix
+that testing showed would not have recovered this specific case) — see `docs/DECISIONS.md` for
+where this is recorded as a load-bearing choice. Also tightened: `agents/nodes/supervisor.py`'s
+routing prompt now explicitly says a question merely containing a word similar to a department's
+name (e.g. "payment") is not the same as being about that department, to reduce how often this
+specific confusion recurs — though the merge fix is what makes a wrong guess *safe*, this prompt
+change only makes the guess itself more often *correct*.
+
+Live-verified with a new regression test constructing the exact failure shape (a full,
+wrong-department scoped list alongside a disjoint, correct unscoped list) rather than only the
+generic "some overlap, no crowding" case the pre-existing test covered — `tests/rlm/test_api.py::
+TestSyncAsyncBridge::test_a_full_scoped_list_no_longer_crowds_out_every_unscoped_hit`.
+
+**Problem 2, addressed alongside at the user's request: even with correct retrieval, nothing in
+the RLM path can compute an actual number.** `aggregate()` is one LLM call producing a prose
+synthesis — never a deterministic tally — so "count incidents per month" could only ever get an
+eyeballed, non-numeric-sounding-but-not-actually-computed estimate, independent of the retrieval
+bug above. Fixed by adding `count_by_month(chunks) -> dict[str, int]` to the curated RLM API
+(counts *distinct documents*, not chunks, per month — one incident's several sections all carry
+the same `created_date`, so counting chunks directly would over-count every incident by its
+section count) and telling `rlm/planner.py`'s system prompt explicitly: for a counting/tallying/
+grouping question, use `count_by_month` (or plain dict-based Python — no imports needed, since
+date-string slicing and dict/list comprehensions are already inside the AST allowlist) and put
+the actual computed value into `result`, rather than trusting `aggregate()` to state a number.
+A second, easy-to-miss bug surfaced fixing this: `agents/nodes/research.py::
+_stringify_research_result` only ever rendered a result dict's `summary` and `recurring_themes`
+keys — a plan correctly computing `result["counts"] = count_by_month(chunks)` would have had that
+computed value silently dropped from the text the user actually sees. Fixed by rendering any
+other populated dict key as a `Title Case: value` line alongside the summary.
+
+**Known, disclosed limitation this fix does not close**: `deterministic_fallback_plan` — the
+fixed, hand-written plan that runs whenever the model's own generated code fails validation, which
+trade-off 28 already found happens on the *majority* of live research turns — is one generic
+template with no counting logic at all, and was deliberately left that way rather than given
+question-shape detection (see the "Known limitations" list above). A counting question that falls
+through to the fallback still gets a prose estimate, not a computed number, until the model's own
+generated code succeeds on a given turn.
+
+**Live-verified, not just unit-tested** (`execute_research` called directly against real Ollama
+and Pinecone, the user's exact question, `get_stream_writer` stubbed since this was run outside a
+graph invocation): with the department forced back to the exact wrong guess from the original
+trace (`"product"`), the model's *own generated plan* — not the fallback — spontaneously used the
+new `count_by_month` function on the first attempt: `count_by_month(filter(search("payment
+incidents", top_k=100), document_type='incident', department='payments'))`, returning a real,
+computed month-by-month tally (`{'2025-10': 1, '2026-03': 2, '2026-05': 1, '2026-07': 1,
+'2026-08': 1}`, 6 incidents) — a complete change in kind from the original "no payment incidents
+were recorded" answer, not merely a better-worded one. Repeating the identical call with the
+*correct* department (`"payments"`) instead returned a materially more complete tally
+(`{'2025-09': 1, '2025-10': 2, '2025-11': 2, '2025-12': 1, '2026-01': 1, '2026-03': 2, '2026-05':
+1, '2026-07': 1, '2026-08': 2}`, summing to **13** — the corpus's full, real count of payment
+incidents). **This confirms both the fix's real benefit and its honest limit in the same
+comparison**: the merge-budget widening turns a wrong department guess from "zero evidence" into
+"real, substantially incomplete evidence" (6 of 13), not into "as complete as a correct guess" (13
+of 13) — the underlying RRF cross-department dilution this fix mitigates, rather than eliminates,
+still means a wrong guess costs real recall, just no longer all of it. Also worth noting rather
+than silently working around: neither generated plan restricted its search to "last year" — the
+curated API has no date-range filter at all, only `count_by_month`'s fixed monthly bucketing, so
+the returned tally spans every month the search surfaced regardless of year. This is a distinct,
+smaller, undisclosed-until-now gap, left as-is for this pass since the user's request was scoped
+to "compute a real number," not "parse a relative date range" — a future session adding a
+`filter(..., after=..., before=...)`-shaped parameter would close it.
+
+The Supervisor's prompt tweak was checked the same way, calling the real routing prompt and
+schema directly against live Ollama for the identical question, 3 times: the department guess
+was `payments` (correct) twice and `core_banking` (wrong, a different confusion than the
+original `product` guess) once — never `product` again in this small sample. Consistent with
+this file's own framing throughout: the prompt change makes the *specific* payments/product
+confusion less likely, it does not make department-guessing reliable in general (trade-off 1's
+model-bound variance still applies), which is exactly why the merge-budget widening, not the
+prompt tweak, is this fix's actual load-bearing safety net.

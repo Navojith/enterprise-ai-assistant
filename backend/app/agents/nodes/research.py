@@ -67,14 +67,28 @@ def _stringify_research_result(result: Any) -> str:
     Mirrors `rlm/executor.py::_stringify`'s unwrapping of `aggregate`'s dict shape, applied
     here to the *final* result rather than a nested call's — kept as a separate, small
     function instead of importing the private one, since the two are allowed to diverge (this
-    one, for instance, could show `recurring_themes` too)."""
+    one, for instance, could show `recurring_themes` too).
+
+    Any dict key beyond `summary`/`recurring_themes` is rendered too, as a `Title Case: value`
+    line — added so a plan that extends `aggregate()`'s dict with a computed field (e.g.
+    `result["counts"] = count_by_month(chunks)`, per `rlm/planner.py`'s system prompt) actually
+    reaches the user, instead of the real computed numbers being silently dropped because this
+    function only ever looked for two specific keys. Only applies once a `summary` is present —
+    a dict with no `summary` key falls through to a plain `str(result)` exactly as before, since
+    there is no established shape to render field-by-field otherwise.
+    """
     if isinstance(result, dict):
         summary = result.get("summary")
-        themes = result.get("recurring_themes")
         if summary is not None:
+            parts = [str(summary)]
+            themes = result.get("recurring_themes")
             if themes:
-                return f"{summary}\n\nRecurring themes: {', '.join(str(theme) for theme in themes)}"
-            return str(summary)
+                parts.append(f"Recurring themes: {', '.join(str(theme) for theme in themes)}")
+            for key, value in result.items():
+                if key in ("summary", "recurring_themes") or not value:
+                    continue
+                parts.append(f"{key.replace('_', ' ').title()}: {value}")
+            return "\n\n".join(parts)
     return str(result)
 
 

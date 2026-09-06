@@ -2,7 +2,10 @@
 plans: `search`, `filter`, `batch`, `sub_agent`, `sub_agents`, `aggregate` — the five functions
 `docs/ARCHITECTURE.md` and `docs/DELIVERY_PLAN.md` name explicitly — plus `group_by_document`,
 added after live testing found `batch`'s fixed-size, order-agnostic splitting could separate one
-document's sections across two batches (see `group_by_document`'s own docstring). Every function
+document's sections across two batches (see `group_by_document`'s own docstring), and
+`count_by_month`, added after live testing found `aggregate()` cannot answer a "how many per
+month" style question — it is one LLM call producing prose, never a deterministic count (see
+`count_by_month`'s own docstring). Every function
 here operates on plain JSON-safe `dict`s, never `RetrievedChunk` model instances or anything else
 with attributes to walk — this keeps the sandbox's data surface exactly as constrained as
 `python_analysis`'s `data: Any` contract, just populated by `search` instead of a caller-supplied
@@ -268,14 +271,8 @@ def build_search(context: RLMContext) -> Callable[..., list[dict[str, Any]]]:
                 # all-department merge (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26): a
                 # plain all-department `hybrid_search` lets RRF fusion bury the correct
                 # department's chunks under several *other* departments' locally-top-ranked but
-                # irrelevant ones. Both searches keep the caller's own `top_k` rather than each
-                # getting a full `top_k` merged into `top_k * 2` the way the retrieval node
-                # does — `sub_agents`'s batch count (and so `RLMBudget`'s sub-agent-call spend)
-                # is directly driven by how many chunks `search` returns, so doubling it here
-                # would silently double a generated plan's own batching math and its sub-agent
-                # budget consumption, not just its evidence quality. Run concurrently so a
-                # department-scoped search costs one extra round-trip's latency, not a
-                # sequential doubling of it.
+                # irrelevant ones. Run concurrently so a department-scoped search costs one extra
+                # round-trip's latency, not a sequential doubling of it.
                 scoped_result, unscoped_result = await asyncio.gather(
                     hybrid_search(
                         context.store,
@@ -294,7 +291,26 @@ def build_search(context: RLMContext) -> Callable[..., list[dict[str, Any]]]:
                 scoped = [] if isinstance(scoped_result, BaseException) else scoped_result
                 unscoped = [] if isinstance(unscoped_result, BaseException) else unscoped_result
                 scoped_count, unscoped_count = len(scoped), len(unscoped)
-                chunks = merge_prioritizing_scoped(scoped, unscoped, top_k=top_k)
+                # Merge budget is the *sum* of both full lists (`top_k * 2`), matching
+                # `agents/nodes/retrieval.py`'s `_MERGED_TOP_K` exactly — not `top_k` alone.
+                # This module used to pass `top_k` here specifically to avoid growing a plan's
+                # own requested chunk count (and so its downstream `batch`/`sub_agents` count and
+                # `RLMBudget` spend). Live-verified that this was a real, worse-than-no-scoping
+                # regression, not a harmless economy: `hybrid_search` never returns "no good
+                # match" for a namespace, only its nearest neighbors — so a *wrong* department
+                # guess still fills all `top_k` scoped slots with irrelevant chunks, and
+                # `merge_prioritizing_scoped` keeps every one of them unconditionally, leaving
+                # zero room for the correct all-department result. Confirmed against a real
+                # question ("payment incidents per month last year", guessed department
+                # `product` instead of `payments`): the all-department search alone surfaced one
+                # genuine payment-incident chunk in its own top `top_k`, and the pre-fix merge
+                # discarded it entirely — strictly worse than running no department-scoping at
+                # all. `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 29 has the full
+                # investigation, including why a smaller reserved quota was tried first and
+                # found insufficient. The accepted cost, same as `retrieval_node` already pays:
+                # a scoped `search()` call can now return up to `top_k * 2` chunks rather than a
+                # fixed `top_k`, growing a plan's batch/sub-agent-call count correspondingly.
+                chunks = merge_prioritizing_scoped(scoped, unscoped, top_k=top_k * 2)
             else:
                 chunks = await hybrid_search(
                     context.store, query_text=query, role=context.role, top_k=top_k
@@ -439,6 +455,34 @@ def group_by_document(
     if current:
         batches.append(current)
     return batches
+
+
+def count_by_month(chunks: list[dict[str, Any]]) -> dict[str, int]:
+    """Count *distinct documents* per calendar month (`created_date`'s `"YYYY-MM"` prefix),
+    sorted chronologically — added specifically for questions asking to count or tally
+    evidence over time (e.g. "how many payment incidents per month"), which
+    `aggregate()` alone cannot answer: `aggregate` is one LLM call producing a prose synthesis,
+    never a deterministic number. `rlm/planner.py`'s system prompt tells the model to prefer
+    this (or equivalent plain Python counting) over asking `aggregate` to guess a count.
+
+    Counts by `document_id`, not by chunk: one incident is chunked into several sections
+    (Summary, Root Cause, Timeline, ...), each carrying the same `created_date`, so counting
+    chunks directly would over-count every incident by its section count. A chunk with a
+    missing or malformed `created_date` (shorter than `"YYYY-MM"`) is skipped rather than
+    corrupting a bucket with a partial key — the same "degrade, don't crash the plan" posture
+    `filter_chunks` and `batch_chunks` already take on bad input.
+    """
+    documents_seen_per_month: dict[str, set[str]] = {}
+    for chunk in chunks:
+        document_id = str(chunk.get("document_id", ""))
+        created_date = str(chunk.get("created_date", ""))
+        if not document_id or len(created_date) < 7:
+            continue
+        month = created_date[:7]
+        documents_seen_per_month.setdefault(month, set()).add(document_id)
+    return {
+        month: len(document_ids) for month, document_ids in sorted(documents_seen_per_month.items())
+    }
 
 
 def _format_evidence(chunks: list[dict[str, Any]]) -> str:
@@ -708,6 +752,7 @@ def build_rlm_globals(context: RLMContext) -> dict[str, Any]:
         "filter": filter_chunks,
         "batch": batch_chunks,
         "group_by_document": group_by_document,
+        "count_by_month": count_by_month,
         "sub_agent": build_sub_agent(context),
         "sub_agents": build_sub_agents(context),
         "aggregate": build_aggregate(context),

@@ -52,3 +52,20 @@ class TestStringifyResearchResult:
 
     def test_a_non_dict_result_is_stringified(self) -> None:
         assert _stringify_research_result("already a string") == "already a string"
+
+    def test_a_summary_with_an_extra_computed_field_renders_it_too(self) -> None:
+        # A plan that extends aggregate()'s dict with e.g. `result["counts"] =
+        # count_by_month(chunks)` must have that reach the final text — not be silently
+        # dropped because this function only ever looked for `summary`/`recurring_themes`.
+        result = _stringify_research_result(
+            {"summary": "13 incidents found", "counts": {"2025-09": 2, "2025-10": 1}}
+        )
+
+        assert "13 incidents found" in result
+        assert "Counts:" in result
+        assert "2025-09" in result
+
+    def test_an_extra_field_that_is_empty_is_omitted(self) -> None:
+        result = _stringify_research_result({"summary": "no incidents found", "counts": {}})
+
+        assert result == "no incidents found"

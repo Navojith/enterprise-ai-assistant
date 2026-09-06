@@ -69,11 +69,22 @@ _SYSTEM_PROMPT = (
     "calls so batches are analyzed concurrently, not one at a time.\n"
     "- aggregate(findings: list[str], question: str) -> dict: combine findings into "
     '{"summary": str, "recurring_themes": list[str]}.\n\n'
+    "- count_by_month(chunks: list[dict]) -> dict[str, int]: count distinct documents per "
+    'calendar month, keyed by "YYYY-MM", sorted chronologically.\n\n'
     "The variable `question` already holds the exact user question text — use it directly "
     "instead of retyping it.\n\n"
+    "If the question asks you to count, tally, or group evidence by a field such as month "
+    '(e.g. "how many incidents per month"), do NOT rely on aggregate() for the number — it '
+    "is one LLM call that writes a prose summary, never a computed count. Use "
+    "count_by_month(chunks) for a month breakdown, or write a short, plain Python loop over "
+    "the chunk dicts for any other grouping (no imports needed — dict/list comprehensions and "
+    "plain string slicing, e.g. created_date[:7] for a year-month, are already allowed), and "
+    "put the actual computed numbers directly into `result` rather than only a prose "
+    "description of them.\n\n"
     "Rules: no imports, no file access, no dunder attribute access, no with/global/nonlocal "
     "statements. Assign your final answer to a variable named `result` (the dict aggregate "
-    "returns is a good choice). Keep the plan short."
+    "returns is a good choice, extended with a computed count/breakdown field when the "
+    "question asks for one). Keep the plan short."
 )
 
 

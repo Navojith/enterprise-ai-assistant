@@ -304,6 +304,23 @@ stale below the backend's *previous* 450s budget (still defaulting to an old 240
 truncation risk with the identical shape as a circuit-breaker trip above; raised to 900s and its
 rationale comment corrected to cite the current backend figure instead of a two-raises-old one.
 
+A fourth session widened `rlm/api.py::build_search`'s department-scoped merge budget from
+`top_k` to `top_k * 2`, after a live reproduction found the narrower budget could make a wrong
+department guess *strictly worse than no scoping at all* — a wrong-department search still fills
+every slot with irrelevant chunks (`hybrid_search` never returns "no good match" for a namespace,
+only its nearest neighbors), and the pre-fix merge kept all of them unconditionally, leaving zero
+room for the correct all-department result. This was put to the user as an explicit choice rather
+than picked unilaterally, because it trades away something real: a scoped `search()` call can now
+return up to twice its requested `top_k` chunks, growing a plan's own `batch`/`group_by_document`
+count and `RLMBudget` spend correspondingly — the exact cost this module's merge call had
+originally been sized to avoid. The user chose to accept that cost over a narrower,
+`top_k`-preserving alternative (a fixed reservation quota for unscoped results), because live
+testing showed the narrower option would not have recovered the reported case either — the
+genuinely relevant chunks were buried too deep in the plain all-department ranking (rank ~18-38
+of a fully-ranked ~224-chunk corpus) for any quota short of "give unscoped its own full budget"
+to reach them. `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 29 has the full investigation,
+including the RRF-based merge alternative that was tried and measured before being rejected.
+
 ---
 
 ## 10. Prompt-injection detection: heuristics first, classifier only when ambiguous
