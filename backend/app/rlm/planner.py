@@ -20,10 +20,13 @@ generated code fails validation":
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import structlog
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from backend.app.agents.prompting import current_date_context
 from backend.app.core.errors import AppError, SandboxViolationError
 from backend.app.llm.provider import LLMProvider
 from backend.app.retrieval.models import DEPARTMENTS, DocumentType
@@ -44,7 +47,7 @@ _PLAN_GENERATION_ATTEMPTS = 2
 _VALID_DOCUMENT_TYPES = ", ".join(sorted(document_type.value for document_type in DocumentType))
 _VALID_DEPARTMENTS = ", ".join(DEPARTMENTS)
 
-_SYSTEM_PROMPT = (
+_TOOLS_DESCRIPTION = (
     "You are generating a short Python search plan to research a question over a large "
     "internal document collection, without loading every document into context.\n\n"
     "You may call ONLY these functions, already available in your execution environment:\n"
@@ -88,6 +91,16 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _build_system_prompt(*, now: datetime) -> str:
+    """Leads with `agents/prompting.py::current_date_context` for the same reason
+    `agents/nodes/supervisor.py` and `agents/nodes/response.py` do: a generated plan reasoning
+    about "this year"/"last year"/a specific year needs the real current date, not `qwen3:4b`'s
+    own stale, pre-cutoff sense of "now" (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 31).
+    `now` is a parameter rather than a `datetime.now()` call here, so this stays unit-testable
+    with a fixed date."""
+    return f"{current_date_context(now=now)} {_TOOLS_DESCRIPTION}"
+
+
 class ResearchPlan(BaseModel):
     """Field order mirrors `RoutingDecision` (`agents/nodes/supervisor.py`) for the same
     reason: under schema-constrained decoding the model commits to fields in declared order, so
@@ -124,10 +137,10 @@ def deterministic_fallback_plan(question: str) -> str:
 
 
 def _retry_messages(
-    question: str, *, previous_code: str, violation: SandboxViolationError
+    question: str, *, previous_code: str, violation: SandboxViolationError, now: datetime
 ) -> list[AnyMessage]:
     return [
-        SystemMessage(content=_SYSTEM_PROMPT),
+        SystemMessage(content=_build_system_prompt(now=now)),
         HumanMessage(content=question),
         HumanMessage(
             content=(
@@ -158,8 +171,9 @@ async def generate_plan(question: str, *, llm: LLMProvider) -> tuple[str, bool]:
     failure and generation-call-failure logs below cover the two paths this module can take
     instead of returning that success is not itself a guarantee of correctness.
     """
+    now = datetime.now(UTC)
     messages: list[AnyMessage] = [
-        SystemMessage(content=_SYSTEM_PROMPT),
+        SystemMessage(content=_build_system_prompt(now=now)),
         HumanMessage(content=question),
     ]
 
@@ -182,7 +196,7 @@ async def generate_plan(question: str, *, llm: LLMProvider) -> tuple[str, bool]:
                 code=plan.code,
                 violations=(exc.details or {}).get("violations"),
             )
-            messages = _retry_messages(question, previous_code=plan.code, violation=exc)
+            messages = _retry_messages(question, previous_code=plan.code, violation=exc, now=now)
             continue
         logger.info("rlm_generated_plan_used", attempt=attempt, question=question, code=plan.code)
         return plan.code, False

@@ -7,7 +7,11 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from backend.app.agents.nodes.supervisor import _available_tool_categories, _build_routing_schema
+from backend.app.agents.nodes.supervisor import (
+    _SYSTEM_PROMPT_TEMPLATE,
+    _available_tool_categories,
+    _build_routing_schema,
+)
 from backend.app.core.security.rbac import Permission
 from backend.app.tools.registry import ToolResult, ToolSpec
 
@@ -60,6 +64,14 @@ class TestAvailableToolCategories:
         )
 
         assert text.count("Python analysis") == 1
+
+    def test_the_system_prompt_template_grounds_the_current_date(self) -> None:
+        """`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 31: live-verified that without this,
+        `qwen3:4b`'s own stale, pre-cutoff sense of "now" routed a real question about the
+        bank's own 2026 data to `"direct"`, reasoning the year "hasn't happened yet". Guards
+        against the `{current_date}` placeholder (filled by `supervisor_node` from
+        `agents/prompting.py::current_date_context`) being accidentally removed."""
+        assert "{current_date}" in _SYSTEM_PROMPT_TEMPLATE
 
     def test_the_analytics_category_warns_it_cannot_retrieve_data(self) -> None:
         """`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 29's second finding: a "Run a Python

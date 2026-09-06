@@ -10,6 +10,13 @@ a broad, multi-document investigation better served by a generated Python search
 single retrieval pass (`docs/ARCHITECTURE.md`'s RLM example: summarizing a year of incidents and
 identifying recurring root causes).
 
+`_SYSTEM_PROMPT_TEMPLATE` leads with `agents/prompting.py::current_date_context` — live testing
+found `qwen3:4b`'s own stale sense of "now" (its training cutoff, well before this project's
+real present-day setting) route a real, answerable question about the bank's own 2026 incident
+data to `"direct"` instead of `"retrieval"`, reasoning that the year "hasn't happened yet"
+(`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 31) — a wrong premise about time, not a wrong
+document. Grounding the real date is the fix, not a routing-logic change.
+
 The prompt only ever names the tool *categories* this principal's role actually has
 (`_available_tool_categories`, from `runtime.context.tool_registry.available_to`) — a Viewer,
 who has no tools beyond search, is never told "tools" exist for anything beyond that, so it
@@ -82,6 +89,7 @@ wrong is safe rather than merely less likely.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
@@ -91,6 +99,7 @@ from pydantic import BaseModel, Field, create_model
 
 from backend.app.agents.context import GraphContext
 from backend.app.agents.principal import principal_from_state
+from backend.app.agents.prompting import current_date_context
 from backend.app.agents.state import AgentState
 from backend.app.core.security.rbac import Permission
 from backend.app.memory.session import build_context_messages
@@ -102,7 +111,8 @@ from backend.app.tools.registry import ToolSpec
 logger = structlog.get_logger(__name__)
 
 _SYSTEM_PROMPT_TEMPLATE = (
-    "You are the routing supervisor for an internal AI assistant at a commercial bank. Decide "
+    "{current_date} You are the routing supervisor for an internal AI assistant at a "
+    "commercial bank. Decide "
     "whether the user's latest message requires searching internal documents (policies, "
     "incident reports, runbooks, architecture docs, product specs, meeting notes) via "
     "retrieval, can be answered directly (greetings, clarifying questions, or general "
@@ -260,6 +270,7 @@ async def supervisor_node(state: AgentState, runtime: Runtime[GraphContext]) -> 
     available_specs = runtime.context.tool_registry.available_to(principal)
     research_available = principal.has_permission(Permission.ANALYTICS_TOOLS)
     system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
+        current_date=current_date_context(now=datetime.now(UTC)),
         tool_categories=_available_tool_categories(available_specs),
         research_clause=_RESEARCH_CLAUSE if research_available else "",
         departments=", ".join(DEPARTMENTS),

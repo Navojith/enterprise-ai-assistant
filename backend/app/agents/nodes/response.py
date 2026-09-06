@@ -16,6 +16,7 @@ to read rather than instructions to follow.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -23,6 +24,7 @@ from langgraph.config import get_stream_writer
 from langgraph.runtime import Runtime
 
 from backend.app.agents.context import GraphContext
+from backend.app.agents.prompting import current_date_context
 from backend.app.agents.state import AgentState
 from backend.app.guardrails.injection import UNTRUSTED_CONTENT_INSTRUCTION, frame_untrusted_content
 from backend.app.memory.session import build_context_messages
@@ -70,6 +72,7 @@ def _build_system_prompt(
     tool_output: str | None,
     research_output: str | None,
     validation_feedback: str | None,
+    now: datetime,
 ) -> str:
     """Pure assembly of the Response node's system prompt — split out from `response_node`
     itself so this logic is unit-testable without `get_stream_writer()`'s graph-only context
@@ -77,13 +80,20 @@ def _build_system_prompt(
     keep `_NO_EVIDENCE_AT_ALL_INSTRUCTION`'s three-way condition (`chunks`/`tool_output`/
     `research_output` all empty) correct under a regression, not just correct today.
 
+    Leads with `agents/prompting.py::current_date_context` for the same reason
+    `agents/nodes/supervisor.py` does — live testing found this node confidently refuse a real
+    question about the bank's own 2026 incident data ("the year has not yet occurred") on
+    `qwen3:4b`'s own stale, pre-cutoff sense of "now", not on anything the evidence actually
+    said (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 31). `now` is a parameter, not a
+    `datetime.now()` call inside this function, so this stays unit-testable with a fixed date.
+
     Every evidence section is wrapped in `frame_untrusted_content` — none of this text was
     written by this system's own operator, all of it came from documents, tools, or a research
     sub-agent, and `SYSTEM_PROMPT` already tells the model what that delimiter means
     (`guardrails/injection.py`'s module docstring: the injection risk here is a compromised
     *document*, which never passed through the chat endpoint at all, so a heuristic screen on
     the way in cannot substitute for this)."""
-    system_prompt = SYSTEM_PROMPT
+    system_prompt = f"{current_date_context(now=now)} {SYSTEM_PROMPT}"
     if not chunks and not tool_output and not research_output:
         system_prompt += _NO_EVIDENCE_AT_ALL_INSTRUCTION
     system_prompt += f"\n\nEvidence:\n{frame_untrusted_content(_format_evidence(chunks))}"
@@ -124,6 +134,7 @@ async def response_node(state: AgentState, runtime: Runtime[GraphContext]) -> di
         tool_output=state.get("tool_output"),
         research_output=state.get("research_output"),
         validation_feedback=state.get("validation_feedback"),
+        now=datetime.now(UTC),
     )
     context_messages = build_context_messages(
         system_prompt=system_prompt,

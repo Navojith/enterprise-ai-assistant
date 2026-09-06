@@ -1535,3 +1535,64 @@ of two independently-unlikely events rather than one likely one — a meaningful
 profile, not a claim of zero residual risk. 3 new tests (386 total, up from 384 — `_NO_SUITABLE_
 TOOL` always validating, including with no real tools offered at all); `ruff`, `ruff format`,
 `mypy --strict` all pass clean.
+
+### 31. `qwen3:4b`'s own stale sense of "now" leaked into routing decisions and final answers, refusing real 2026 data because "the year hasn't happened yet"
+
+A user reported a confidently wrong refusal: "Run a Python analysis to count how many payment
+incidents happened per month in 2026" was routed to `"direct"` (skipping retrieval and every
+tool entirely) and answered "Payment incidents for 2026 cannot be analyzed as the year has not
+yet occurred and no future data is available in the system" — a factually false premise about
+the *bank's own calendar*, not a retrieval gap or a model-quality issue with the actual evidence.
+The full LangSmith trace made the mechanism undeniable rather than merely suspected: the
+Supervisor's own captured `reasoning` field said outright "the year 2026 is in the future, so
+there are no incidents for that year yet," and the Response node's own captured reasoning went
+further, stating "the current year is 2023, and 2026 hasn't happened yet." Nothing in any system
+prompt anywhere in this codebase had ever told the model what the real current date actually is
+— `qwen3:4b`'s training-data cutoff predates this project's real present-day setting by several
+years, and with no grounding to override it, the model reasoned from its own internal, wrong
+sense of "now" as if it were fact, then acted on that false premise with full confidence rather
+than hedging.
+
+This is a different failure class from every prior trade-off in this file: not a retrieval bug,
+not a merge bug, not a tool-choice bug — a temporal-grounding gap that could silently distort
+*any* prompt where the model reasons about a relative or absolute date ("last year", "this
+year", "in 2026"), and had already been distorting two of them without anyone noticing until a
+real user question happened to land on a year past the model's own internal sense of the
+present.
+
+**Fix**: a new shared helper, `agents/prompting.py::current_date_context(now: datetime) -> str`
+— pure, takes `now` as a parameter rather than calling `datetime.now()` itself (matching
+`llm/chain.py`'s existing pure-logic/real-clock split), so every caller stays unit-testable with
+a fixed date. Every system prompt that reasons about the user's request now leads with it:
+`agents/nodes/supervisor.py`'s routing/department/search-query prompt, `agents/nodes/
+response.py`'s final-answer prompt, and `rlm/planner.py`'s search-plan-generation prompt (the
+same class of "this year"/"last year" reasoning the RLM path does explicitly, via `count_by_
+month`, per trade-off 29). Not touched: the guardrail classifier and the Tools node's choice/
+fill-args prompts, which don't make date-dependent judgments about whether a request is
+answerable at all — extending the fix there was assessed as unnecessary for this failure mode,
+not merely deferred.
+
+**Live-verified, not just unit-tested**: calling the real Supervisor routing prompt and schema
+directly against live Ollama for the identical question, 5 times — **4 of 5** now correctly
+routed to `"retrieval"` or `"research"` instead of `"direct"`, each reasoning explicitly from the
+*correct* premise ("the current date is 2026-09-06, which means we are in the middle of 2026").
+The residual 1-of-5 attempt is worth recording precisely because it shows the fix works as
+designed rather than merely getting lucky: its reasoning was grounded in the *correct* date, but
+made a new, narrower, and considerably more defensible mistake — confusing "the year 2026 isn't
+finished yet" with "no 2026 data can exist in the system at all," rather than repeating the
+original false premise about the year being entirely in the future. Calling the real Response
+node's prompt directly with the identical question and no evidence, the answer was "No internal
+documents were consulted" — correct and complete, with no false claim about the year not having
+occurred at all.
+
+**Not a claim of eliminating all temporal reasoning errors** — trade-off 1's model-bound
+variance still applies, and the residual attempt above shows a related but distinct
+misunderstanding can still occur. What this fix specifically closes is the *factually false*
+premise (the wrong current year) that made the original refusal so confidently, avoidably wrong;
+a real analyst reading "the year hasn't occurred yet" about their own bank's very-real, current
+data has no way to know that's false without checking a trace, which is precisely the kind of
+hallucination this project's guardrails exist to catch in other shapes (citations, brand,
+injection) but had never covered for dates. 6 new tests (391 total, up from 386 —
+`agents/prompting.py`'s own formatting, `_build_system_prompt`'s date-leading text in both
+`response.py` and `rlm/planner.py`, and a regression guard on the Supervisor's template
+placeholder); `ruff`, `ruff format`, `mypy --strict` all pass clean.

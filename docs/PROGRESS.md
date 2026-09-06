@@ -495,6 +495,26 @@ mechanism) rather than requiring any new paid service.
 
 Newest first. One line per meaningful change.
 
+- **2026-09-07** — Fixed a user-reported confidently wrong refusal, root-caused via the full
+  LangSmith trace the user provided rather than guessed at: "Run a Python analysis to count how
+  many payment incidents happened per month in 2026" was routed to `"direct"` (skipping
+  retrieval entirely) and answered that the year "has not yet occurred" — the trace's own
+  captured reasoning showed why: `qwen3:4b`'s own stale, pre-cutoff sense of "now" (its
+  reasoning stated outright "the current year is 2023") had never been corrected by anything in
+  any system prompt. Fixed with a new shared, pure helper, `agents/prompting.py::
+  current_date_context(now: datetime)`, added to every prompt that reasons about the user's
+  request and could be distorted by a wrong sense of time: `agents/nodes/supervisor.py`'s
+  routing prompt, `agents/nodes/response.py`'s final-answer prompt, and `rlm/planner.py`'s plan
+  prompt. Live-verified, not just unit-tested: the real Supervisor routing call, 5 times for the
+  identical question, now correctly routes to `"retrieval"`/`"research"` 4 of 5 times (vs. the
+  original false-premise refusal every time before); the 1 residual attempt reasoned from the
+  *correct* date but made a narrower, more defensible mistake (confusing "this year isn't over
+  yet" with "no data can exist"), not the original false premise. The Response node, called
+  directly with no evidence, now says "No internal documents were consulted" — correct — instead
+  of fabricating a false reason. 6 new tests (391 total, up from 386); `ruff`, `ruff format`,
+  `mypy --strict` all pass clean. Full investigation in `docs/ASSUMPTIONS_AND_TRADEOFFS.md`
+  trade-off 31.
+
 - **2026-09-06** — At the user's explicit request, closed the structural gap the previous entry
   identified but left open: `agents/nodes/tools.py::_build_choice_schema`'s `Literal` now always
   includes a sentinel, `_NO_SUITABLE_TOOL = "no_suitable_tool"`, alongside the real tool names,
