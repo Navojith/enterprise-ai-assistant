@@ -487,12 +487,20 @@ see trade-off 28's third addendum). Distinguishing what a fix at this one stage 
 plausibly cover, rather than letting a narrow, verified improvement read as "the variance
 problem is now solved," was treated as more important than looking maximally finished.
 
-**Verified live, not just unit-tested.** 5 new tests (`tests/rlm/test_api.py`'s
-`TestAggregateCompletenessCheck`, 373 total) cover a clean pass, a retry that improves, a retry
-that does not, and a retry call that itself fails — but the mitigation was also replayed through
-the *real* `build_aggregate` wiring against live Ollama, using real sub-agent findings from the
-original investigation, before being called done. That live run demonstrated the fix earning
-its keep on the first attempt: the initial call's summary dropped all 13 real citations, the
-retry fired automatically, and it recovered a complete, correctly-cited summary — direct
-evidence the specific failure mode this was built for is real and recoverable, not merely
-theoretically possible.
+**Verified live, not just unit-tested — twice, independently.** 5 new tests
+(`tests/rlm/test_api.py`'s `TestAggregateCompletenessCheck`, 373 total) cover a clean pass, a
+retry that improves, a retry that does not, and a retry call that itself fails — but the
+mitigation was also replayed through the *real* `build_aggregate` wiring against live Ollama
+twice: once against real sub-agent findings from the original investigation, and once (after
+the fix had already shipped) on a completely fresh live draw of the whole pipeline, requested
+specifically to rule out the first result being a one-off. Both runs demonstrated the fix
+earning its keep, not merely passing tests: both times the initial `aggregate` call's summary
+dropped several real citations on its first attempt, and both times the bounded retry fired
+automatically and recovered a complete, correctly-cited summary — direct, twice-replicated
+evidence that the specific failure mode this was built for is real and recoverable, not a
+one-off or merely theoretically possible. The second run also surfaced, live, the concrete
+shape of the boundary described above: one sub-agent call failed outright (a genuine Ollama
+timeout), losing that batch's evidence before it ever reached `aggregate` — a real instance of
+the "evidence lost upstream" case this fix does not and cannot cover, exactly as scoped. Full
+narrative of both runs in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's third and fourth
+addenda.

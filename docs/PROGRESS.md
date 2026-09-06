@@ -495,6 +495,25 @@ mechanism) rather than requiring any new paid service.
 
 Newest first. One line per meaningful change.
 
+- **2026-09-06** — Committed and pushed the previous entry's `aggregate()` completeness-check
+  fix (`3f47fa5` on `fix/retrieval-context-and-corpus-content`) and rebuilt/redeployed the
+  `backend`/`frontend`/`mcp_server` Docker images from it; all four containers confirmed healthy
+  post-rebuild. Then, at the user's explicit request, ran one more fresh live verification —
+  deliberately a new draw of the whole pipeline, not a replay of the fixture the first live check
+  used, to rule out that check having been a one-off. Real, unmodified `search` →
+  `group_by_document` → `_direct_finding` → `build_aggregate` against live Ollama/Pinecone on the
+  identical spec-example question: search again retrieved all 13 real incidents; one sub-agent
+  call (batch 1) failed outright on a genuine live timeout, losing that batch's ~4 incidents'
+  worth of evidence before it ever reached `aggregate` — a real, live instance of exactly the
+  "evidence lost upstream" case the fix is explicitly scoped not to cover; the remaining 6
+  citations were then all dropped by `aggregate`'s *first* draft (an independent bad draw, not
+  the same one from before) and fully recovered by the bounded retry
+  (`rlm_aggregate_retry_improved missing_after=0`) — this time with no internal-consistency
+  issue in the final summary at all, and the model even self-corrected a stale "one outage
+  report" phrasing carried over from one sub-agent's finding. No code changed for this
+  verification pass; `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28's fourth addendum and
+  `docs/DECISIONS.md` §13 updated to record it — the retry mechanism is now confirmed live twice,
+  independently, not once.
 - **2026-09-06** — Chased down the RLM answer-quality variance the previous entry's live RBAC
   testing surfaced, at the user's explicit request to investigate rather than accept it. Rather
   than guess, replayed every stage of the exact failing live turn in isolation against the real

@@ -1245,6 +1245,34 @@ missing evidence) that a citation-presence check cannot see and was not asked to
 an open, disclosed limitation rather than silently patched with a broader (and, per the user's
 explicit instruction, unwanted) consistency-verification mechanism.
 
+**Fourth addendum: a second, independent live run — after the fix had already been committed —
+confirmed the retry is not a one-off, and surfaced one more real evidence-loss channel it does
+not (and was never meant to) cover.** Requested specifically to stress-test the retry with a
+*fresh* draw rather than replaying the first run's fixture: the real, unmodified pipeline
+(`search` → `group_by_document` → `_direct_finding` → `build_aggregate`) was run again end to
+end against live Ollama and Pinecone on the identical question. Search again retrieved all 13
+incidents (20 chunks, 3 batches of 8/8/4). Batch 0 and batch 2's sub-agent calls succeeded
+correctly (5 incidents + 2 recurring causes; 1 incident, correctly noting no recurring cause
+since it was alone in its batch) — but **batch 1's sub-agent call failed outright**, a genuine
+live timeout (`Ollama did not respond within 90.0s (after 2 attempts)`), losing that batch's
+~4 incidents' worth of evidence *before it ever reached `aggregate`*. The remaining 6 real
+citations were passed to `aggregate`, whose first draft dropped **all 6** of them
+(`rlm_aggregate_incomplete`) — a second, independently-occurring bad draw, not a replay of the
+first — and the bounded retry again recovered all of them completely
+(`rlm_aggregate_retry_improved missing_after=0`). This time the final summary showed **no**
+internal inconsistency: `recurring_themes` correctly named both real recurring causes, and the
+model's own prose went further than expected, explicitly noticing and correcting batch 2's
+stale "there was one outage report" phrasing to reflect all six recovered incidents. Two
+things this run establishes, both worth keeping distinct: **the retry mechanism generalizes** —
+two independent live draws, not one, both produced a bad first attempt that the same bounded
+retry fully recovered — and **the third addendum's residual inconsistency issue is not
+deterministic** (it did not recur here), but that is evidence of stochastic *absence*, not proof
+the mechanism is now robust to it; treat both observations as data points, not a settled
+verdict either way. The batch-1 timeout is a live, concrete instance of exactly the boundary
+this fix was scoped not to cross: evidence lost to a sub-agent's own failure never becomes part
+of the raw findings text at all, so no citation-presence check run afterward — however well it
+works — can see or recover it.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see
