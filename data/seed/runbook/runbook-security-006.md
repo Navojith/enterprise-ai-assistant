@@ -14,16 +14,16 @@ This runbook defines the standard operating procedure for the security on-call t
 
 ## Detection
 
-This condition is typically surfaced by an automated alert tied to an elevated error rate, latency, or queue-depth threshold specific to the affected system.
+The certificate-expiry monitor alerts when a certificate has fewer than 14 days remaining before expiry, listed on the Certificate Inventory dashboard.
 
 ## Response Steps
 
-1. Acknowledge the alert and confirm the affected system.
-2. Check the system's current health dashboard for corroborating signals before taking action.
-3. Apply the documented mitigation for this failure mode.
-4. Confirm recovery against the same signal that triggered the alert.
-5. Open a follow-up ticket for any remediation that could not be completed during the incident.
+1. Identify every service and integration that presents or validates the expiring certificate.
+2. Generate the replacement certificate through the internal certificate authority and validate its chain.
+3. Deploy the new certificate to a single instance first and confirm TLS handshakes succeed before a full rollout.
+4. Roll the new certificate out to the remaining instances and confirm the old certificate is no longer in use.
+5. Update the certificate inventory record with the new expiry date.
 
 ## Escalation
 
-If the mitigation does not restore normal operation within the runbook's expected recovery window, escalate to the platform engineering on-call rotation.
+If a certificate has already expired and is causing active handshake failures, escalate immediately to the platform engineering on-call rotation rather than following the staged rollout.

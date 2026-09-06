@@ -30,6 +30,30 @@ runs first on every turn and reads the full message list to make its routing dec
 dedicated node would mean loading that same state twice. It is still its own distinct
 `MEMORY_UPDATE` activity event so the panel shows it as a separate step, matching ASSESSMENT.md's
 "memory updates" bullet.
+
+The same call also produces `search_query` (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26): a
+standalone, context-resolved rewrite of the user's latest message, for `retrieval_node` and
+`research_node` to search with instead of the raw message text. This is not a second LLM call —
+just one more field on the routing decision the Supervisor already makes with the full message
+history in view, which is exactly what a follow-up like "what are the response steps in that
+document?" needs to be answered correctly: taken alone, that sentence names no document at all,
+so retrieval literally cannot select the right one without conversation context resolving "that
+document" first. Live verification found this as a real bug before the fix existed — the raw
+follow-up text retrieved chunks from unrelated departments, never the document actually being
+discussed — and confirmed fixed afterward.
+
+It also produces `department` (same trade-off 26): the specific department this question is
+about, if one is identifiable, so `retrieval_node` can scope `hybrid_search` to that one
+namespace instead of always fanning out across every department. Verified live that even a
+correctly-identified, correctly-ranked answer within its own department's search results can
+still lose to several *other* departments' unrelated top-ranked chunks once Reciprocal Rank
+Fusion combines all departments' results — RRF scores purely by each chunk's rank within its
+own list, so five irrelevant departments each contributing their own locally-top-ranked (but
+globally irrelevant) chunk collectively outweighs the one genuinely relevant department's
+correct answer. Scoping to one namespace when it's knowable removes that dilution entirely
+rather than trying to out-tune RRF's constant against it. `"unclear"` is a distinct value, not
+an empty string, specifically so the model can express "this genuinely could span departments"
+under grammar-constrained decoding rather than being forced to guess one.
 """
 
 from __future__ import annotations
@@ -48,6 +72,7 @@ from backend.app.core.security.rbac import Permission
 from backend.app.memory.session import build_context_messages
 from backend.app.memory.summarizer import needs_summarization, summarize_oldest
 from backend.app.observability.events import ActivityEvent, ActivityEventType
+from backend.app.retrieval.models import DEPARTMENTS
 from backend.app.tools.registry import ToolSpec
 
 logger = structlog.get_logger(__name__)
@@ -59,7 +84,15 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "retrieval, can be answered directly (greetings, clarifying questions, or general "
     "questions needing no company-specific evidence), or is better served by a tool call "
     "({tool_categories}){research_clause}. When genuinely uncertain between retrieval and "
-    "direct, prefer retrieval — an evidence-backed answer is safer than a confident guess."
+    "direct, prefer retrieval — an evidence-backed answer is safer than a confident guess. You "
+    "must also rewrite the user's latest message into a standalone search query: use the "
+    'conversation above to resolve any pronoun or reference ("that document", "it", "the '
+    'runbook") into the specific document, topic, or keywords being asked about, so the query '
+    "makes sense with no other context. If the latest message already stands alone, or the "
+    "route does not need a search query, repeat it unchanged. Finally, name the one department "
+    "({departments}) this question is about, if it is clearly about one — a question naming a "
+    "specific system, document, or team usually is. Answer 'unclear' if it could span more "
+    "than one department or the department cannot be told from the conversation."
 )
 
 # Only ever appended when this principal holds `Permission.ANALYTICS_TOOLS` — see the module
@@ -112,6 +145,9 @@ def _build_routing_schema(*, include_research: bool) -> type[BaseModel]:
     (route first) let the model choose `route="direct"` while its own `reasoning` field,
     generated afterward, argued the opposite. Putting reasoning first forces the one sentence
     of deliberation to happen before the choice it is supposed to justify, not after.
+    `search_query` and `department` come last, after the route is already committed: neither
+    needs to precede the routing choice the way `reasoning` does, and by this point the model
+    has already articulated what the question is about.
     """
     routes = _ROUTES_WITH_RESEARCH if include_research else _ROUTES_WITHOUT_RESEARCH
     return create_model(
@@ -125,6 +161,27 @@ def _build_routing_schema(*, include_research: bool) -> type[BaseModel]:
         route=(
             Literal[routes],
             Field(description="Where to send this turn next, consistent with the reasoning above."),
+        ),
+        search_query=(
+            str,
+            Field(
+                description=(
+                    "The user's latest message, rewritten to stand alone: resolve any pronoun "
+                    "or reference using the conversation above (e.g. 'that document' becomes "
+                    "the document's actual name). Repeat the message unchanged if it already "
+                    "stands alone."
+                )
+            ),
+        ),
+        department=(
+            Literal[(*DEPARTMENTS, "unclear")],
+            Field(
+                description=(
+                    "The one department this question is about, if clearly identifiable. "
+                    "'unclear' if it could span more than one department or cannot be told "
+                    "from the conversation."
+                )
+            ),
         ),
     )
 
@@ -171,6 +228,7 @@ async def supervisor_node(state: AgentState, runtime: Runtime[GraphContext]) -> 
     system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
         tool_categories=_available_tool_categories(available_specs),
         research_clause=_RESEARCH_CLAUSE if research_available else "",
+        departments=", ".join(DEPARTMENTS),
     )
     context_messages = build_context_messages(
         system_prompt=system_prompt, summary=summary, recent_messages=recent_messages
@@ -180,17 +238,22 @@ async def supervisor_node(state: AgentState, runtime: Runtime[GraphContext]) -> 
         context_messages, schema=routing_schema, reasoning=False
     )
     route: str = decision.route  # type: ignore[attr-defined]
+    search_query: str = decision.search_query  # type: ignore[attr-defined]
+    department_choice: str = decision.department  # type: ignore[attr-defined]
+    search_department = None if department_choice == "unclear" else department_choice
     writer(
         ActivityEvent(
             event_type=ActivityEventType.REASONING,
             node="supervisor",
             message=decision.reasoning,  # type: ignore[attr-defined]
-            data={"route": route},
+            data={"route": route, "search_query": search_query, "department": department_choice},
         )
     )
 
     updates: dict[str, Any] = {
         "route": route,
+        "search_query": search_query,
+        "search_department": search_department,
         # Reset per-turn validation bookkeeping so a retry loop from a previous turn can never
         # bias this turn's Validator into bailing out early.
         "retry_count": 0,

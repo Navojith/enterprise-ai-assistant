@@ -9,6 +9,24 @@ anything the model has said, so retrieval cannot be widened by a prompt.
 A `VectorStoreUnavailableError` degrades to an empty result (`docs/ARCHITECTURE.md`'s
 "Failure and degradation" table) rather than failing the turn — the Response node already
 handles "no evidence" by saying so explicitly rather than fabricating an answer.
+
+The search query is `state["search_query"]` — the Supervisor's context-resolved rewrite of the
+user's latest message (`agents/nodes/supervisor.py`'s module docstring,
+`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26) — not the raw message text. A follow-up like
+"what are the response steps in that document?" carries almost no retrievable signal on its own;
+searching with it verbatim was verified live to return chunks from unrelated departments rather
+than the document actually under discussion. `_latest_user_text` remains as the fallback for the
+(untested-in-practice) case of `search_query` being unset, so this node degrades to its old
+behavior rather than raising if it is ever reached without the Supervisor having run first.
+
+`state["search_department"]`, when the Supervisor could identify one, is passed straight through
+to `hybrid_search`'s `namespaces` parameter to scope the search to that one department instead of
+fanning out across all of them. Verified live this matters even when the correct chunk already
+ranks first *within* its own department's results: fusing every department together lets each
+*other* department's own top-ranked (but irrelevant) chunk dilute the fused ranking, since
+Reciprocal Rank Fusion scores purely by a chunk's rank within its own list, blind to whether that
+list's department was ever relevant to the question at all. `None` (department unclear) falls
+back to `hybrid_search`'s existing all-departments default, unchanged.
 """
 
 from __future__ import annotations
@@ -49,13 +67,14 @@ async def retrieval_node(state: AgentState, runtime: Runtime[GraphContext]) -> d
         )
     )
 
-    query = _latest_user_text(state["messages"])
+    query = state.get("search_query") or _latest_user_text(state["messages"])
+    department = state.get("search_department")
     writer(
         ActivityEvent(
             event_type=ActivityEventType.RETRIEVAL_STATUS,
             node="retrieval",
             message="Querying dense and sparse indexes concurrently.",
-            data={"query": query},
+            data={"query": query, "department": department or "all"},
         )
     )
 
@@ -76,6 +95,7 @@ async def retrieval_node(state: AgentState, runtime: Runtime[GraphContext]) -> d
             runtime.context.pinecone_store,
             query_text=query,
             role=state["principal_role"],
+            namespaces=[department] if department else None,
             top_k=_TOP_K,
         )
         chunks = await rerank_chunks(

@@ -14,12 +14,12 @@ This document describes the architecture of the system covered by "Employee Dire
 
 ## Components
 
-The system is composed of a request-handling service layer, a persistence layer backed by a managed relational database, and an asynchronous event stream used to propagate state changes to downstream consumers.
+The system is composed of the core employee directory service, an integration layer synchronizing changes to downstream identity and payroll systems, and a self-service portal employees use to view and update their own records.
 
 ## Reliability Considerations
 
-The system is designed to degrade gracefully under partial failure: downstream dependencies are called with bounded timeouts and circuit breakers, and critical paths have a documented fallback behavior rather than failing the entire request.
+Directory changes are propagated to downstream systems through an at-least-once event stream with idempotent consumers, so a redelivered event updates a downstream system correctly rather than duplicating the change.
 
 ## Related Runbooks
 
-Operational procedures for responding to failures in this system are maintained separately in the corresponding runbook documents.
+Operational procedures for this system are covered by the "Employee Offboarding Access Revocation Runbook".

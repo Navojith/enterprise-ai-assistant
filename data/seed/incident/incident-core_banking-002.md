@@ -14,8 +14,8 @@ On 2026-02-05, the core banking team responded to an incident involving core led
 
 ## Impact
 
-Impact was contained to internal operations and a subset of customer-facing functionality for the duration of the incident.
+Read-only reporting queries against the replica returned data up to 20 minutes stale. The primary ledger's write path and customer-facing balance checks, which read from the primary, were unaffected.
 
 ## Resolution
 
-The team applied the relevant runbook, restored normal operation, and scheduled a follow-up review to assess whether additional safeguards were warranted.
+The team found a large batch export job saturating the replica's disk I/O, paused the export, and replication lag returned to normal within 30 minutes. The export was rescheduled to run outside business hours.

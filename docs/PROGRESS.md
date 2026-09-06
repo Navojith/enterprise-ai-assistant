@@ -492,6 +492,34 @@ mechanism) rather than requiring any new paid service.
 
 Newest first. One line per meaningful change.
 
+- **2026-09-06** — Fixed a real "wrong answer" bug the user hit running the Streamlit frontend as
+  a Viewer: a natural 3-turn conversation about the payment-failure runbook ended with the
+  assistant claiming its response steps weren't in the evidence, despite the document containing
+  them in plain text. Reproduced live against the raw API on the user's exact scenario before
+  touching code, then found and fixed three separate, compounding retrieval bugs one layer at a
+  time, verifying against the same live scenario after each fix rather than assuming success —
+  full detail, including the two points where the user was asked how far to extend the fix rather
+  than it being decided unilaterally, in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26. (1)
+  `retrieval_node` searched with the raw, unresolved follow-up text ("what are the response steps
+  covered in that document?" names no document); fixed by extending the Supervisor's existing
+  per-turn routing schema with a `search_query` field — a context-resolved rewrite of the latest
+  message — at zero extra LLM calls. (2) Even a corrected query didn't surface the right chunk,
+  because `Chunk.to_pinecone_record()` never embedded the document title or section heading, and
+  the seed corpus's generic sections were byte-identical across every document of a type (not just
+  runbooks — the same anti-pattern was found and fixed across architecture docs, product specs,
+  policies, meeting notes, and non-payment incidents once the user asked for the full corpus to be
+  audited); fixed by embedding `"{title} — {section}\n\n{text}"` while keeping citations and
+  displayed text on a separate, plain `section_text` field, rewriting every generic section with
+  real per-document content, and including `title` in `compute_content_hash` so the format change
+  itself forced the necessary full re-embed rather than the idempotency check silently skipping
+  it. (3) Reciprocal Rank Fusion across all 6 departments diluted a chunk that was already
+  correctly ranked #1 *within* its own department, because RRF scores purely by in-list rank with
+  no notion of cross-department relevance; fixed by having the Supervisor's same routing call also
+  name the one department a question is about (or `"unclear"`), passed through to `hybrid_search`'s
+  existing `namespaces` parameter. Final live verification replayed the user's exact 3-turn
+  conversation end to end: all three turns now answer correctly, with turn 3 quoting the runbook's
+  five response steps verbatim, correctly cited. 6 new tests (348 total, up from 342 before this
+  session); `ruff`, `ruff format`, `mypy --strict` all pass clean.
 - **2026-09-06** — Fixed a real coupling bug the user hit running the just-built containerized
   frontend: it crashed on startup with `ModuleNotFoundError: No module named 'backend'`
   (`from backend.app.observability.events import ActivityEvent, ActivityEventType` in

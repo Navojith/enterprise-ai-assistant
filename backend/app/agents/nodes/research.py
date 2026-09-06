@@ -1,9 +1,17 @@
 """Research node: the Supervisor's `"research"` route — the RLM path.
 
-Reuses the latest user message as the research question and delegates everything else to
-`rlm/executor.py::execute_research`: generating a Python search plan, validating and running it
-in `rlm/sandbox.py`, fanning out to recursive sub-agents under a bounded semaphore, and
-aggregating. This node's own job is small and mirrors `agents/nodes/tools.py`'s shape closely —
+Uses `state["search_query"]` — the Supervisor's context-resolved rewrite of the latest message
+(`agents/nodes/supervisor.py`'s module docstring, `docs/ASSUMPTIONS_AND_TRADEOFFS.md`
+trade-off 26) — as the research question, falling back to the raw latest message
+(`_latest_user_text`) if `search_query` is ever unset. A broad research turn is exactly as
+vulnerable to an unresolved follow-up reference as a single-hop retrieval turn is: "and what
+about last month?" names no topic on its own, and the generated search plan can only decompose
+a question it can actually read.
+
+Delegates everything else to `rlm/executor.py::execute_research`: generating a Python search
+plan, validating and running it in `rlm/sandbox.py`, fanning out to recursive sub-agents under
+a bounded semaphore, and aggregating. This node's own job is small and mirrors
+`agents/nodes/tools.py`'s shape closely —
 read the principal, call through to the one place authorization and execution actually happen,
 turn the outcome (or any failure) into activity events and state, never let a degradation crash
 the turn.
@@ -72,7 +80,7 @@ async def research_node(state: AgentState, runtime: Runtime[GraphContext]) -> di
         )
     )
 
-    question = _latest_user_text(state["messages"])
+    question = state.get("search_query") or _latest_user_text(state["messages"])
     principal = principal_from_state(state)
     settings = runtime.context.settings
 

@@ -14,8 +14,8 @@ Customers and internal stakeholders have identified a need addressed by "Instant
 
 ## Requirements
 
-The feature must be available across supported platforms, must degrade gracefully when a dependent service is unavailable, and must be observable enough to diagnose issues in production without requiring a code change.
+The feature must confirm a transfer to the recipient's account within 10 seconds end to end, must operate outside normal banking hours including weekends, and must fall back to a standard next-business-day transfer if the instant-payment rail is unavailable.
 
 ## Out of Scope
 
-This specification does not cover changes to unrelated systems; any dependency identified during implementation should be raised as a separate specification.
+This specification does not cover cross-border instant transfers, which depend on a separate rail with different settlement guarantees and will be scoped separately.

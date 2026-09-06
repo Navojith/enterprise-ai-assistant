@@ -18,4 +18,4 @@ The group reviewed the current status related to "HR Systems Vendor Evaluation M
 
 ## Action Items
 
-Action items were assigned with owners and target dates, to be followed up on in the next recurring sync.
+The team agreed to request a follow-up security assessment from the shortlisted vendor, to confirm the vendor's data retention practices align with the bank's policy, and to bring a recommendation to the next meeting.

@@ -14,8 +14,8 @@ This policy, "Customer Complaint Handling Policy", establishes the bank's requir
 
 ## Policy Statement
 
-All personnel must comply with the requirements set out in this document. Exceptions require documented approval from the relevant department lead and must be time-bound and reviewed periodically.
+Every customer complaint must be acknowledged within one business day, investigated by the appropriate team, and resolved or escalated within the timeframe committed to the customer.
 
 ## Enforcement
 
-Violations of this policy are handled according to the bank's standard disciplinary process and may be escalated to compliance or legal depending on severity.
+A complaint that breaches its resolution timeframe is automatically escalated to the customer support manager, and repeated breaches for the same root cause are raised to the relevant product or engineering team.

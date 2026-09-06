@@ -62,6 +62,20 @@ class TestAvailableToolCategories:
         assert text.count("Python analysis") == 1
 
 
+def _decision(**overrides: object) -> dict[str, object]:
+    """A complete, valid `RoutingDecision` payload, with any field replaceable — pass `None`
+    for a field to omit it entirely, so a test can check that field is actually required
+    rather than merely accepting `None` as its value."""
+    fields: dict[str, object] = {
+        "reasoning": "because",
+        "route": "direct",
+        "search_query": "q",
+        "department": "unclear",
+    }
+    fields.update(overrides)
+    return {key: value for key, value in fields.items() if value is not None}
+
+
 class TestBuildRoutingSchema:
     """`"research"` must be a structurally impossible value for a principal the Supervisor did
     not offer it to — bind-time filtering, mirroring `tests/agents/nodes/test_tools.py`'s
@@ -71,23 +85,55 @@ class TestBuildRoutingSchema:
         schema = _build_routing_schema(include_research=False)
 
         with pytest.raises(ValidationError):
-            schema.model_validate({"reasoning": "because", "route": "research"})
+            schema.model_validate(_decision(route="research"))
 
     def test_research_validates_when_included(self) -> None:
         schema = _build_routing_schema(include_research=True)
 
-        instance = schema.model_validate({"reasoning": "because", "route": "research"})
+        instance = schema.model_validate(_decision(route="research"))
         assert instance.route == "research"  # type: ignore[attr-defined]
 
     def test_the_base_routes_always_validate_either_way(self) -> None:
         for include_research in (False, True):
             schema = _build_routing_schema(include_research=include_research)
             for route in ("retrieval", "direct", "tools"):
-                instance = schema.model_validate({"reasoning": "because", "route": route})
+                instance = schema.model_validate(_decision(route=route))
                 assert instance.route == route  # type: ignore[attr-defined]
 
     def test_reasoning_is_required(self) -> None:
         schema = _build_routing_schema(include_research=False)
 
         with pytest.raises(ValidationError):
-            schema.model_validate({"route": "direct"})
+            schema.model_validate(_decision(reasoning=None))
+
+    def test_search_query_is_required(self) -> None:
+        """`search_query` is what lets `retrieval_node`/`research_node` resolve a follow-up
+        like "what are the response steps in that document?" into a standalone query — see
+        `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26. Missing it should fail validation the
+        same way a missing `reasoning` does, not silently default to an empty string."""
+        schema = _build_routing_schema(include_research=False)
+
+        with pytest.raises(ValidationError):
+            schema.model_validate(_decision(search_query=None))
+
+    def test_department_is_required(self) -> None:
+        """`department` is what lets `retrieval_node` scope `hybrid_search` to one namespace —
+        see `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26. Missing it should fail validation
+        rather than silently searching every department."""
+        schema = _build_routing_schema(include_research=False)
+
+        with pytest.raises(ValidationError):
+            schema.model_validate(_decision(department=None))
+
+    def test_department_accepts_a_real_department_or_unclear(self) -> None:
+        schema = _build_routing_schema(include_research=False)
+
+        for department in ("payments", "security", "unclear"):
+            instance = schema.model_validate(_decision(department=department))
+            assert instance.department == department  # type: ignore[attr-defined]
+
+    def test_department_rejects_an_unknown_value(self) -> None:
+        schema = _build_routing_schema(include_research=False)
+
+        with pytest.raises(ValidationError):
+            schema.model_validate(_decision(department="not-a-real-department"))

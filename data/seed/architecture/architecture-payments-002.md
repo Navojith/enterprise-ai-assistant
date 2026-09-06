@@ -14,12 +14,12 @@ This document describes the architecture of the system covered by "Payment Gatew
 
 ## Components
 
-The system is composed of a request-handling service layer, a persistence layer backed by a managed relational database, and an asynchronous event stream used to propagate state changes to downstream consumers.
+The integration layer consists of a gateway adapter for each supported card network, a shared retry-and-timeout wrapper, and a webhook receiver that processes asynchronous settlement notifications from each gateway.
 
 ## Reliability Considerations
 
-The system is designed to degrade gracefully under partial failure: downstream dependencies are called with bounded timeouts and circuit breakers, and critical paths have a documented fallback behavior rather than failing the entire request.
+Each gateway adapter maintains its own connection pool and circuit breaker so one gateway's outage cannot exhaust connections needed by another, and every outbound request carries a bounded client-side timeout independent of the gateway's own advertised SLA.
 
 ## Related Runbooks
 
-Operational procedures for responding to failures in this system are maintained separately in the corresponding runbook documents.
+Operational procedures for this system are covered by the following runbooks: "Payment Gateway Failover Runbook"; "Card Network Reconciliation Runbook".

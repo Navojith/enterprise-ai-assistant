@@ -14,12 +14,12 @@ This document describes the architecture of the system covered by "Identity and 
 
 ## Components
 
-The system is composed of a request-handling service layer, a persistence layer backed by a managed relational database, and an asynchronous event stream used to propagate state changes to downstream consumers.
+The system is composed of a central identity provider handling authentication, a policy engine evaluating role-based access decisions, and an audit log capturing every access grant and revocation.
 
 ## Reliability Considerations
 
-The system is designed to degrade gracefully under partial failure: downstream dependencies are called with bounded timeouts and circuit breakers, and critical paths have a documented fallback behavior rather than failing the entire request.
+The identity provider runs across multiple availability zones so a single zone failure does not block authentication, and access decisions are cached briefly at the policy engine so a transient outage does not immediately lock out users who already held a valid session.
 
 ## Related Runbooks
 
-Operational procedures for responding to failures in this system are maintained separately in the corresponding runbook documents.
+Operational procedures for this system are covered by the following runbooks: "Credential-Stuffing Response Runbook"; "Certificate Rotation Runbook".

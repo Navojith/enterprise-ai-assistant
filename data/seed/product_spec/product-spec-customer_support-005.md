@@ -14,8 +14,8 @@ Customers and internal stakeholders have identified a need addressed by "In-App 
 
 ## Requirements
 
-The feature must be available across supported platforms, must degrade gracefully when a dependent service is unavailable, and must be observable enough to diagnose issues in production without requiring a code change.
+The feature must preserve chat history across app restarts within the same support session, must route the customer to a human agent if the automated assistant cannot resolve the request within a configured number of turns, and must let the customer attach a screenshot to a message.
 
 ## Out of Scope
 
-This specification does not cover changes to unrelated systems; any dependency identified during implementation should be raised as a separate specification.
+This specification does not cover phone or email support channels, which are handled by the existing ticketing system independently of in-app chat.

@@ -831,6 +831,96 @@ it serving real requests from the backend over the compose network, and a full c
 the raw API completed end to end (`event: done`, ~20s) with no regression from any of these
 changes.
 
+### 26. A user-reported "wrong answer" on a real 3-turn conversation traced to three separate, compounding retrieval bugs — found and fixed one layer at a time
+
+The user reported that, logged in as a Viewer through the Streamlit UI, asking "What is our
+incident response runbook for payment failures?" followed by two natural follow-ups ("can you
+give a summary?" then "what are the response steps covered in that document?") produced a final
+answer claiming the runbook's response steps were "not specified in the evidence" — despite
+`runbook-payments-001.md` containing five numbered steps in plain text. Reproduced live against
+the raw API on the exact scenario before touching any code, per this project's standing practice,
+rather than guessing at a fix. Three distinct, compounding causes surfaced, each confirmed by
+direct experiment against live Pinecone before being called the cause:
+
+**Cause 1 — retrieval searched with the raw, unresolved follow-up text.** `retrieval_node` built
+its query from `_latest_user_text(state["messages"])` — the literal latest message only, with no
+conversation context. Turn 2's query was literally the six words `"can you give a summary?"`;
+turn 3's was `"what are the response steps covered in that document?"` — neither names a document
+at all. Confirmed live: both retrieved chunks from unrelated departments (HR, security,
+customer-support, core-banking), never the payments runbook. **Fix:** the Supervisor already
+makes one schema-constrained call per turn with the full message history in view to decide
+`route`; extended its `RoutingDecision` schema (`agents/nodes/supervisor.py::_build_routing_schema`)
+with a `search_query` field — a standalone, context-resolved rewrite of the latest message — at
+zero extra LLM calls. `retrieval_node` and `research_node` now search with `state["search_query"]`
+instead of the raw message. Verified live: turn 3's query correctly became "What are the response
+steps covered in the Payment Gateway Failover Runbook?", with "that document" genuinely resolved.
+
+**Cause 2 — the embedded chunk text carried no document identity, and the corpus's generic
+sections were byte-identical across documents.** Even with a corrected, fully-specific query,
+`runbook-payments-001::Response Steps` still didn't surface — checked directly against live
+Pinecone with `top_k=100` (effectively the whole namespace): it ranked **#33 of 77 on dense** and
+**#71 of 76 on sparse**, because `Chunk.to_pinecone_record()`'s embedded `chunk_text` field was
+`self.text` alone — the section body, with no document title or section heading — and the seed
+corpus's generic runbook sections (`Purpose`, `Detection`, `Response Steps`, `Escalation`) were
+verified to be byte-for-byte identical across all 10 runbooks by design of the original generator
+template. The same investigation, once the user was told and asked how far to extend the fix,
+found the identical anti-pattern in every other document type's generic sections (architecture
+docs' `Components`/`Reliability Considerations`/`Related Runbooks`, product specs' `Requirements`/
+`Out of Scope`, policies' `Policy Statement`/`Enforcement`, meeting notes' `Action Items`, and the
+five non-payment incidents' `Impact`/`Resolution`) — all templated identically within their type,
+the same latent weakness the payment-failure incidents' deliberately varied root causes had always
+avoided. **Fix, in two parts:** (1) `to_pinecone_record` now embeds
+`f"{title} — {section}\n\n{text}"` in `chunk_text` while a new `section_text` field carries the
+plain body separately, so `PineconeStore.search` reads `RetrievedChunk.text` back unprefixed —
+citations and the text shown to the LLM are unaffected. `compute_content_hash` now includes
+`title`, both so a title-only change is never missed by the idempotency check, and — as a direct
+consequence — so this format change itself forced a full, correct re-embed of all 224 chunks
+rather than silently leaving the index inconsistent with what ingestion's manifest believed it
+already had (confirmed: `Unchanged (skipped): 0` on the migration run, `Unchanged (skipped): 224`
+on the run after). (2) `scripts/generate_seed_corpus.py`'s five document-type generators
+(`_runbooks`, `_architecture_docs`, `_non_payment_incidents`, `_product_specs`, `_policies`,
+`_meeting_notes`) now draw each generic section's content from a per-title details dict — real,
+system-specific detection thresholds, response steps, and requirements, mirroring the specificity
+`_PAYMENT_ROOT_CAUSES` already had — instead of one shared template. Architecture docs' `Related
+Runbooks` section is generated, not hand-authored, from `_RUNBOOKS` itself filtered by department,
+so it can never drift out of sync with the real runbook titles. Verified live: the target chunk
+rose to rank #2 of 8 for the exact same query that previously didn't surface it in the top 100.
+
+**Cause 3 — Reciprocal Rank Fusion across all 6 departments diluted a genuinely correct,
+top-ranked answer.** Even after cause 2's fix, the *original*, deliberately vague turn-1 phrasing
+("What is our incident response runbook for payment failures?" — which never literally quotes
+"Payment Gateway" or "Failover") still failed, for a new and different reason: checked directly,
+`runbook-payments-001::Purpose` ranked **#1 on dense search within the `payments` namespace
+alone** — genuinely correct. But `hybrid_search`'s default (`namespaces=None`) fans out across all
+6 departments, and `reciprocal_rank_fusion` scores purely by each chunk's *rank within its own
+list*, with no notion of confidence or whether that list's department was ever relevant to the
+question. Five other departments each contributed their own locally-top-ranked (but topically
+irrelevant) chunk, and those five collectively outweighed the one relevant department's correct
+answer in the fused result. **Fix:** the Supervisor's same routing call now also names the one
+`department` (`retrieval/models.py::DEPARTMENTS`) the question is about, or `"unclear"` if it
+genuinely could span more than one — a closed `Literal` for reliable grammar-constrained decoding,
+not a free-text guess. `retrieval_node` passes it straight through to `hybrid_search`'s existing
+`namespaces` parameter, scoping the search to one department when it's knowable and falling back
+to the previous all-departments behavior when it isn't.
+
+**Why this is presented as three causes rather than one fix-and-move-on:** each fix was verified
+live against the *exact* user-reported scenario before the next cause was investigated, and each
+verification found the same symptom persisting for a new, previously-hidden reason — never
+assumed fixed on the strength of the previous fix's own success. The user was asked, and chose,
+at both branch points where the investigation could have stopped (extending the corpus-content fix
+beyond runbooks to every document type; then extending the fix again to department-scoped search)
+rather than the scope being decided unilaterally.
+
+**Verified live, end to end, the identical 3-turn scenario the user reported:** turn 1 correctly
+answers "Payment Gateway Failover Runbook" citing it by title; turn 2's "can you give a summary?"
+resolves to `search_query: "summarize Payment Gateway Failover Runbook"`, retrieves all four of
+that runbook's sections, and correctly summarizes its trigger threshold and procedure; turn 3's
+"what are the response steps covered in that document?" resolves to `search_query: "Payment
+Gateway Failover Runbook response steps"`, retrieves `runbook-payments-001::Response Steps` at
+rank #1, and the final answer quotes all five steps verbatim, correctly cited. 6 new tests across
+`tests/retrieval/test_models.py` and `tests/agents/nodes/test_supervisor.py` (348 total, up from
+342 before this session); `ruff`, `ruff format`, `mypy --strict` all pass clean.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see

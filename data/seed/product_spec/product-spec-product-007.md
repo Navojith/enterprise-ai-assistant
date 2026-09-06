@@ -14,8 +14,8 @@ Customers and internal stakeholders have identified a need addressed by "Biometr
 
 ## Requirements
 
-The feature must be available across supported platforms, must degrade gracefully when a dependent service is unavailable, and must be observable enough to diagnose issues in production without requiring a code change.
+The feature must only enable biometric login after the customer has completed at least one successful password-based login on that device, must fall back to password entry if biometric verification fails a configured number of times, and must disable biometric login automatically if the device's biometric enrollment changes.
 
 ## Out of Scope
 
-This specification does not cover changes to unrelated systems; any dependency identified during implementation should be raised as a separate specification.
+This specification does not cover biometric verification for high-value transaction approval, which is covered separately by the Step-Up Authentication specification.

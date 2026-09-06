@@ -14,8 +14,8 @@ This policy, "Incident Disclosure and Regulatory Reporting Policy", establishes 
 
 ## Policy Statement
 
-All personnel must comply with the requirements set out in this document. Exceptions require documented approval from the relevant department lead and must be time-bound and reviewed periodically.
+Any incident meeting the regulatory definition of a reportable event must be disclosed to the relevant regulator within the mandated timeframe, and affected customers must be notified in line with applicable consumer protection requirements.
 
 ## Enforcement
 
-Violations of this policy are handled according to the bank's standard disciplinary process and may be escalated to compliance or legal depending on severity.
+A missed regulatory reporting deadline is escalated immediately to legal and compliance leadership, and the incident commander for the underlying event must document the cause of the delay.

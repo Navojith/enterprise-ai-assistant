@@ -18,4 +18,4 @@ The group reviewed the current status related to "Payment Gateway Vendor Renewal
 
 ## Action Items
 
-Action items were assigned with owners and target dates, to be followed up on in the next recurring sync.
+The team agreed to request updated SLA terms from the gateway vendor ahead of renewal, to confirm the failover runbook still reflects the vendor's current failover process, and to finalize the renewal decision before the current contract's expiry.

@@ -14,16 +14,16 @@ This runbook defines the standard operating procedure for the product on-call te
 
 ## Detection
 
-This condition is typically surfaced by an automated alert tied to an elevated error rate, latency, or queue-depth threshold specific to the affected system.
+The crash-reporting service alerts when the crash-free session rate for the newly released version drops below the release-health threshold.
 
 ## Response Steps
 
-1. Acknowledge the alert and confirm the affected system.
-2. Check the system's current health dashboard for corroborating signals before taking action.
-3. Apply the documented mitigation for this failure mode.
-4. Confirm recovery against the same signal that triggered the alert.
-5. Open a follow-up ticket for any remediation that could not be completed during the incident.
+1. Confirm the elevated crash rate is specific to the new release version, not a device- or OS-level issue affecting all versions.
+2. Halt the phased rollout so no additional users receive the affected version.
+3. Trigger a server-side rollback to the previous stable version where the release supports it, or submit an expedited store rollback otherwise.
+4. Monitor the crash-free session rate to confirm it recovers to baseline for users on the prior version.
+5. File a release-blocking defect describing the crash signature for engineering to fix before the next release attempt.
 
 ## Escalation
 
-If the mitigation does not restore normal operation within the runbook's expected recovery window, escalate to the platform engineering on-call rotation.
+If the crash affects a payment or authentication flow, escalate immediately to the payments or security on-call rotation in addition to the mobile platform team.

@@ -18,4 +18,4 @@ The group reviewed the current status related to "Mobile Banking Sprint Retrospe
 
 ## Action Items
 
-Action items were assigned with owners and target dates, to be followed up on in the next recurring sync.
+The team agreed to add automated crash-rate monitoring to the release checklist, to shorten the phased rollout window for low-risk changes, and to revisit whether the current rollback runbook still matches the team's actual release process.

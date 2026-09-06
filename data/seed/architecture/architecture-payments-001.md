@@ -14,12 +14,12 @@ This document describes the architecture of the system covered by "Payments Proc
 
 ## Components
 
-The system is composed of a request-handling service layer, a persistence layer backed by a managed relational database, and an asynchronous event stream used to propagate state changes to downstream consumers.
+The platform is composed of the payment orchestration service, which validates and routes transactions; the ledger posting service, which records the financial effect of each transaction; and an outbound gateway adapter layer that translates requests into the format required by each downstream payment gateway.
 
 ## Reliability Considerations
 
-The system is designed to degrade gracefully under partial failure: downstream dependencies are called with bounded timeouts and circuit breakers, and critical paths have a documented fallback behavior rather than failing the entire request.
+The orchestration service enforces per-gateway circuit breakers so a single gateway's degradation does not exhaust connection pools shared with healthy gateways, and every transaction is written with an idempotency key so a client-side retry after a timeout cannot post the same payment twice.
 
 ## Related Runbooks
 
-Operational procedures for responding to failures in this system are maintained separately in the corresponding runbook documents.
+Operational procedures for this system are covered by the following runbooks: "Payment Gateway Failover Runbook"; "Card Network Reconciliation Runbook".

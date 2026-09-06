@@ -14,8 +14,8 @@ Customers and internal stakeholders have identified a need addressed by "Real-Ti
 
 ## Requirements
 
-The feature must be available across supported platforms, must degrade gracefully when a dependent service is unavailable, and must be observable enough to diagnose issues in production without requiring a code change.
+The feature must notify the customer within 30 seconds of a transaction the fraud engine scores above the alerting threshold, must let the customer confirm or dispute the transaction directly from the notification, and must not alert on a transaction the customer has pre-authorized as trusted.
 
 ## Out of Scope
 
-This specification does not cover changes to unrelated systems; any dependency identified during implementation should be raised as a separate specification.
+This specification does not cover the fraud-scoring model itself, which is owned by the Fraud Detection Service and evolves independently of this notification feature.

@@ -14,8 +14,8 @@ This policy, "Change Management and Release Approval Policy", establishes the ba
 
 ## Policy Statement
 
-All personnel must comply with the requirements set out in this document. Exceptions require documented approval from the relevant department lead and must be time-bound and reviewed periodically.
+Any change to a production core banking system must be peer-reviewed, tested in a non-production environment, and approved by a designated release approver before deployment; emergency changes require retroactive approval within one business day.
 
 ## Enforcement
 
-Violations of this policy are handled according to the bank's standard disciplinary process and may be escalated to compliance or legal depending on severity.
+A change deployed without required approval is treated as a policy violation subject to review by engineering leadership, regardless of whether the change itself caused any incident.

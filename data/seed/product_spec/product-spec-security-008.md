@@ -14,8 +14,8 @@ Customers and internal stakeholders have identified a need addressed by "Step-Up
 
 ## Requirements
 
-The feature must be available across supported platforms, must degrade gracefully when a dependent service is unavailable, and must be observable enough to diagnose issues in production without requiring a code change.
+The feature must require a second authentication factor for any transaction above the configured value threshold, must accept either a one-time code or biometric confirmation as the second factor, and must expire an unused step-up challenge after a short, configurable timeout.
 
 ## Out of Scope
 
-This specification does not cover changes to unrelated systems; any dependency identified during implementation should be raised as a separate specification.
+This specification does not cover step-up requirements for internal employee tools, which follow the separate internal access policy.

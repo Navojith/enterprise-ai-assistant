@@ -14,16 +14,16 @@ This runbook defines the standard operating procedure for the core banking on-ca
 
 ## Detection
 
-This condition is typically surfaced by an automated alert tied to an elevated error rate, latency, or queue-depth threshold specific to the affected system.
+An alert fires when the ledger primary fails its health check for two consecutive intervals, or replication lag on the standby exceeds the configured threshold.
 
 ## Response Steps
 
-1. Acknowledge the alert and confirm the affected system.
-2. Check the system's current health dashboard for corroborating signals before taking action.
-3. Apply the documented mitigation for this failure mode.
-4. Confirm recovery against the same signal that triggered the alert.
-5. Open a follow-up ticket for any remediation that could not be completed during the incident.
+1. Confirm the primary ledger database is genuinely unreachable, not a transient network blip, by checking connectivity from two independent hosts.
+2. Promote the most caught-up standby replica to primary using the documented promotion script.
+3. Repoint the ledger service's connection string to the newly promoted primary and restart affected pods.
+4. Verify write traffic resumes and the ledger's transaction-per-second metric returns to baseline.
+5. Rebuild a new standby replica from the promoted primary to restore redundancy.
 
 ## Escalation
 
-If the mitigation does not restore normal operation within the runbook's expected recovery window, escalate to the platform engineering on-call rotation.
+If promotion fails, or the standby's replication lag means data loss is possible, escalate immediately to the database engineering on-call rotation before proceeding further.

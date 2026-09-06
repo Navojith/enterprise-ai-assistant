@@ -73,6 +73,32 @@ class AgentState(TypedDict, total=False):
     # (`agents/nodes/supervisor.py::_available_routes`).
     route: Literal["retrieval", "direct", "tools", "research"]
 
+    # A standalone, context-resolved version of the user's request, written by the Supervisor
+    # (`agents/nodes/supervisor.py::_build_routing_schema`) in the same schema-constrained call
+    # that decides `route` — not a second LLM call, just one more field on the same decision.
+    # `retrieval_node` and `research_node` search with this instead of the raw latest message,
+    # because a follow-up turn's literal text ("what are the response steps in that document?")
+    # carries almost no lexical or semantic signal about *which* document once it is taken out
+    # of the conversation it depends on; the Supervisor sees the full message history and can
+    # resolve "that document" into the actual document name before search ever runs. Verified
+    # live that this was a real, reproducible bug (`docs/ASSUMPTIONS_AND_TRADEOFFS.md`
+    # trade-off 26): the raw-message query retrieved zero chunks from the correct document on
+    # two consecutive follow-up turns.
+    search_query: str
+
+    # The one department (`retrieval/models.py::DEPARTMENTS`) this turn's question is about, if
+    # the Supervisor could tell — `None` when it genuinely could span departments or isn't
+    # identifiable. `retrieval_node` passes this straight through to `hybrid_search`'s
+    # `namespaces` parameter to search one namespace instead of all of them. Verified live that
+    # this matters even after a chunk is correctly the top-ranked result *within its own
+    # department*: fanning out across every department means Reciprocal Rank Fusion also
+    # ranks each *other* department's own top-ranked (but topically irrelevant) chunk highly,
+    # since RRF scores purely by a chunk's rank within its own list — several irrelevant
+    # departments each contributing one high-ranked chunk can collectively outweigh the one
+    # relevant department's genuinely correct answer. Scoping to the right namespace when it's
+    # knowable removes that dilution rather than trying to out-tune RRF's constant against it.
+    search_department: str | None
+
     retrieved_chunks: Annotated[list[RetrievedChunk], merge_retrieved_chunks]
 
     # The Tools node's result for this turn, folded into the Response node's context exactly
