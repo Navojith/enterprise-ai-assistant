@@ -43,17 +43,22 @@ follow-up text retrieved chunks from unrelated departments, never the document a
 discussed — and confirmed fixed afterward.
 
 It also produces `department` (same trade-off 26): the specific department this question is
-about, if one is identifiable, so `retrieval_node` can scope `hybrid_search` to that one
-namespace instead of always fanning out across every department. Verified live that even a
+about, if one is identifiable, so `retrieval_node` can run a search scoped to that one namespace
+*alongside* its existing all-department search and prioritize the scoped hits
+(`agents/nodes/retrieval.py::_merge_prioritizing_scoped`). Verified live that even a
 correctly-identified, correctly-ranked answer within its own department's search results can
 still lose to several *other* departments' unrelated top-ranked chunks once Reciprocal Rank
 Fusion combines all departments' results — RRF scores purely by each chunk's rank within its
 own list, so five irrelevant departments each contributing their own locally-top-ranked (but
 globally irrelevant) chunk collectively outweighs the one genuinely relevant department's
-correct answer. Scoping to one namespace when it's knowable removes that dilution entirely
-rather than trying to out-tune RRF's constant against it. `"unclear"` is a distinct value, not
-an empty string, specifically so the model can express "this genuinely could span departments"
-under grammar-constrained decoding rather than being forced to guess one.
+correct answer. `"unclear"` is a distinct value, not an empty string, specifically so the model
+can express "this genuinely could span departments" under grammar-constrained decoding rather
+than being forced to guess one — though guessing one wrong still had to be made *safe*, not just
+possible to avoid: hard-scoping to the guessed department (excluding every other one) was this
+fix's first version, and was itself found live to be a regression, since a 4B model's department
+guess is not reliably grounded and a wrong guess made the correct document unreachable rather
+than merely diluted. `retrieval_node` never excludes other departments on the strength of this
+field alone; it only prioritizes.
 """
 
 from __future__ import annotations

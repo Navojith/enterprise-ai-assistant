@@ -921,6 +921,41 @@ rank #1, and the final answer quotes all five steps verbatim, correctly cited. 6
 `tests/retrieval/test_models.py` and `tests/agents/nodes/test_supervisor.py` (348 total, up from
 342 before this session); `ruff`, `ruff format`, `mypy --strict` all pass clean.
 
+**Postscript — cause 3's own fix was itself a real regression, found on the very next real
+session.** The next time the user actually used the fixed system, two new questions ("find the
+document that outlines the data retention policy" and "find the document that details
+certificate rotation") both failed with "no evidence" answers, despite both documents existing.
+Reproduced live before touching code, as always: the Supervisor's `department` guess for both
+was simply wrong — `product` instead of `human_resources`, `core_banking` instead of `security`
+— and cause 3's original fix had passed that guess straight through to `hybrid_search`'s
+`namespaces` parameter, *excluding* every other department outright. A 4B model's department
+guess is not reliably grounded, and hard-scoping to a wrong guess makes the correct document
+**unreachable**, not merely diluted — strictly worse than the all-department search this was
+meant to improve on. Fixed by never excluding on the strength of `department` alone: `retrieval_
+node` now runs the department-scoped search *and* the existing all-department search concurrently
+(`asyncio.gather`, one extra Pinecone round-trip, not a sequential doubling of latency) and merges
+them with `_merge_prioritizing_scoped`, keeping every scoped hit (protecting a *correct* guess
+from cause 3's dilution) while always giving the all-department list a full, un-starved chance to
+contribute (protecting a *wrong* guess with the exact recall that existed before department-
+scoping was ever added). Getting the merge budget right took two more live-verified wrong turns,
+both worth recording rather than smoothing over: an equal split (`_TOP_K` each, capped at
+`_TOP_K` merged) left zero room for the safety net at all, since a real department's own scoped
+search always fills the whole cap by itself; halving the *scoped* list's own budget instead broke
+the originally-fixed case, because the correct chunk for the exact reported bug's query only
+ranked 6th within its own department's fused results (BM25 over-rewards several incident
+"Timeline" sections that happen to mention the word "runbook" in passing) — trimming that list to
+4 silently dropped it again. The fix that actually held: give both searches their own full
+`_TOP_K` budget, uncontended, and cap the merge at the sum of both (`_TOP_K * 2`) — the only cap
+that drops nothing from either list except genuine duplicates. Verified live: both new queries
+now answer correctly (the wrong department guess persisted for the certificate-rotation query on
+one run and corrected itself on another — an LLM classification call is not deterministic between
+identical requests — and the answer was correct either way, which is exactly what the safety net
+is for), and the full original 3-turn scenario above was re-verified end to end to confirm no
+regression from the larger merged result set. 1 new test file
+(`tests/agents/nodes/test_retrieval.py`, covering `_merge_prioritizing_scoped`'s dedup, ordering,
+cap, and — explicitly — the wrong-guess safety-net property), 7 new tests (355 total, up from
+348); `ruff`, `ruff format`, `mypy --strict` all pass clean.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see

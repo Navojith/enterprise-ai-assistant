@@ -492,6 +492,22 @@ mechanism) rather than requiring any new paid service.
 
 Newest first. One line per meaningful change.
 
+- **2026-09-06** — Fixed a real regression in the department-scoped search fix from the
+  previous entry below, found the next time the user actually used it: "find the document that
+  outlines the data retention policy" and "find the document that details certificate rotation"
+  both returned "no evidence," because the Supervisor's `department` guess was simply wrong for
+  both (`product` instead of `human_resources`, `core_banking` instead of `security`), and the
+  previous fix had excluded every other department outright once a guess was made — turning a
+  wrong guess into an unreachable document instead of a merely diluted one. Fixed by never
+  excluding on `department` alone: `retrieval_node` now runs the scoped and all-department
+  searches concurrently and merges them (`_merge_prioritizing_scoped`), so a correct guess still
+  gets protected from the RRF dilution the previous fix targeted, while a wrong guess still has
+  the full-recall, all-department search as a safety net. Getting the merge budget right took two
+  more live-verified wrong turns before landing on "give both searches their own full budget,
+  cap the merge at the sum of both" — full narrative, including the two intermediate wrong
+  attempts, in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26's postscript. Re-verified the
+  original 3-turn scenario end to end to confirm no regression from the larger merged result set.
+  7 new tests (355 total, up from 348); `ruff`, `ruff format`, `mypy --strict` all pass clean.
 - **2026-09-06** — Fixed a real "wrong answer" bug the user hit running the Streamlit frontend as
   a Viewer: a natural 3-turn conversation about the payment-failure runbook ended with the
   assistant claiming its response steps weren't in the evidence, despite the document containing
