@@ -79,6 +79,21 @@ class TestVerifyCitations:
             answer=answer, retrieved_chunks=[], tool_output=None, research_output=None
         ) == ["Tool result"]
 
+    def test_a_citation_naming_the_tool_itself_is_allowed_when_a_tool_actually_ran(self) -> None:
+        # Regression test for a live-verified bug (docs/ASSUMPTIONS_AND_TRADEOFFS.md trade-off
+        # 22): a real MCP tool call produced this exact citation shape — the model naming the
+        # tool it used rather than reproducing the system prompt's generic "Tool result" label
+        # verbatim — and it was wrongly flagged as hallucinated, exhausting the Validator's
+        # retry budget for an answer that was never actually wrong.
+        answer = "Jane Doe is on the payments team [Employee Directory]."
+
+        assert (
+            verify_citations(
+                answer=answer, retrieved_chunks=[], tool_output="Jane Doe", research_output=None
+            )
+            == []
+        )
+
     def test_research_findings_citation_is_allowed_only_when_research_actually_ran(self) -> None:
         answer = "See the summary [Research findings]."
 

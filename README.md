@@ -114,6 +114,7 @@ Tool execution respects these permissions at the execution boundary — the agen
 | [`docs/DELIVERY_PLAN.md`](docs/DELIVERY_PLAN.md) | Build cycles, risk register, acceptance criteria |
 | [`docs/SETUP.md`](docs/SETUP.md) | Prerequisites, environment variables, running locally |
 | [`docs/ASSUMPTIONS_AND_TRADEOFFS.md`](docs/ASSUMPTIONS_AND_TRADEOFFS.md) | What was assumed, traded away, and why |
+| [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md) | Minute-by-minute demo video script, mapped to grading criteria |
 
 ---
 

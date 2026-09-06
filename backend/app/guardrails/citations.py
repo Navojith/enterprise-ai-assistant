@@ -31,19 +31,29 @@ def verify_citations(
     tool_output: str | None,
     research_output: str | None,
 ) -> list[str]:
-    """Returns every citation in `answer` that names neither a retrieved chunk's title nor a
-    non-chunk evidence channel that was actually present this turn (`response.py::
-    _build_system_prompt` labels those sections literally "Tool result" / "Research findings")
-    — i.e. every hallucinated citation. Empty means every citation in the answer is real.
+    """Returns every citation in `answer` that is hallucinated — i.e. does not correspond to
+    real evidence this turn actually had. Empty means every citation in the answer is real.
 
-    A label is only accepted when the corresponding evidence was actually present this turn: a
-    `[Tool result]` citation on a turn where no tool ran is just as hallucinated as citing a
-    document that was never retrieved.
+    **Retrieved chunks get an exact-title check** because they are several distinct, nameable
+    sources: citing one that was never actually retrieved is a real fabrication, and the model
+    cannot game this by choosing a different label — a chunk's title is what it is.
+
+    **A tool result or research summary does not**, and this is a live-verified correction, not
+    the original design: `response.py`'s system prompt labels that section "Tool result" /
+    "Research findings" as a generic header, but a real MCP tool call naturally produced a
+    citation naming the *tool* instead (`[Employee Directory]`, not `[Tool result]`) — and
+    rejecting that as "hallucinated" repeatedly exhausted the Validator's retry budget for an
+    answer that was never actually wrong (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 22).
+    Unlike retrieved chunks, a tool call or a research turn is exactly *one* piece of real
+    evidence, not several distinct sources to pick the wrong one from — there is no meaningful
+    "which of several real things did this actually come from" check to make, so once either is
+    present, no citation on that turn is flagged: the underlying evidence is genuinely real
+    either way, and only the exact label text was ever in question.
     """
-    allowed = {chunk.title.lower() for chunk in retrieved_chunks}
-    if tool_output:
-        allowed.add("tool result")
-    if research_output:
-        allowed.add("research findings")
-
-    return [citation for citation in extract_citations(answer) if citation.lower() not in allowed]
+    citations = extract_citations(answer)
+    if not citations:
+        return []
+    if tool_output or research_output:
+        return []
+    allowed_titles = {chunk.title.lower() for chunk in retrieved_chunks}
+    return [citation for citation in citations if citation.lower() not in allowed_titles]

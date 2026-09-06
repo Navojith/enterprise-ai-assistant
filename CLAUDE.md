@@ -17,6 +17,7 @@ Then read the document matching the work:
 | `docs/DELIVERY_PLAN.md` | When picking up a cycle — scope, cut order, risks, acceptance criteria |
 | `docs/SETUP.md` | For prerequisites, environment variables, run commands |
 | `docs/ASSUMPTIONS_AND_TRADEOFFS.md` | When recording a new assumption — append, do not rewrite |
+| `docs/DEMO_SCRIPT.md` | Before recording the deliverable demo video — minute-by-minute, mapped to grading criteria |
 
 ## Standing rules
 

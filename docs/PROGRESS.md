@@ -461,9 +461,9 @@ From `ASSESSMENT.md`. Tracked separately because these are graded independently 
 
 - [ ] Public source repository
 - [x] Architecture diagram — Mermaid in `README.md`/`docs/ARCHITECTURE.md`, confirmed sufficient with the user
-- [ ] Demo video (45 min), public URL
+- [ ] Demo video (45 min), public URL — script ready: `docs/DEMO_SCRIPT.md`
 - [ ] LangSmith traces shown in the demo — **record within 14 days** of the traced run (free-tier retention)
-- [ ] Assumptions and trade-offs presented in the demo
+- [ ] Assumptions and trade-offs presented in the demo — see `docs/DEMO_SCRIPT.md`'s 37:00–42:00 segment
 
 ---
 
@@ -471,6 +471,22 @@ From `ASSESSMENT.md`. Tracked separately because these are graded independently 
 
 Newest first. One line per meaningful change.
 
+- **2026-09-06** — Wrote `docs/DEMO_SCRIPT.md` (a minute-by-minute, criteria-mapped script for
+  the mandatory 45-minute demo video) and, before handing it off, dry-ran every scripted message
+  against the live stack rather than trusting the script's own prose was accurate. That dry run
+  found one more real bug the script itself would otherwise have walked straight into on camera:
+  the Analyst's scripted MCP-tool question correctly called `employee_directory` but then failed
+  citation verification twice and exhausted the Validator's retry budget, because the model
+  naturally cited `[Employee Directory]` (naming the tool) rather than reproducing
+  `guardrails/citations.py`'s hardcoded generic placeholder `[Tool result]` verbatim — a real gap
+  in a control that had only ever been unit-tested against that same hardcoded string, not
+  against what a live model actually writes. Root-caused and fixed: `verify_citations` now
+  accepts any citation once a tool or research turn actually happened (exactly one piece of real
+  evidence, unlike several distinct retrieved chunks, so there's no meaningful "which real thing
+  was this instead of" question to ask), keeping strict exact-title matching only for retrieved
+  chunks. Re-verified live: the identical question now passes validation on the first attempt.
+  Full detail and reasoning in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 22. One new
+  regression test (335 total); `ruff`, `ruff format`, `mypy --strict` all pass clean.
 - **2026-09-06** — Built and verified Cycle 7 (frontend, observability, docs) live end to end
   against real Ollama, Pinecone, Postgres, and the MCP server, all four running together. Built
   the Streamlit chat UI (`frontend/app.py` + `frontend/api_client.py`) and

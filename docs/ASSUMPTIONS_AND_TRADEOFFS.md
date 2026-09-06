@@ -595,6 +595,46 @@ detect and strip a stale draft after the fact, is the fix that matches what actu
 mandatory requirement is actually met end to end. The fix in both cases was the same discipline:
 trace (or attack) the real path the evaluator will actually exercise, not a proxy for it.
 
+### 22. Citation verification rejected a tool call's own natural citation, exhausting the Validator's retry budget
+
+Found while dry-running the demo script's own RBAC segment (log in as Analyst, ask a question
+that reaches the `employee_directory` MCP tool) — not by the 335 passing unit tests, which
+stayed green throughout, because `tests/guardrails/test_citations.py` only ever exercised
+`verify_citations` with the exact literal label `response.py`'s system prompt uses as a section
+header (`[Tool result]`), never with a citation shaped the way a real model actually writes one.
+
+**What happened live:** the Analyst's answer correctly called `employee_directory`, got a real
+result, and cited it as `[Employee Directory]` — a specific, more informative label than the
+generic `"Tool result"` placeholder `guardrails/citations.py` hardcoded as the only accepted
+string for tool-sourced evidence. `verify_citations` flagged it as hallucinated, the Validator
+sent it back to Response, the second draft cited `[Employee directory result]` — equally natural,
+equally rejected — and the retry budget (1) exhausted, returning the answer with an unnecessary
+caveat rather than passing cleanly. The underlying evidence was never fabricated; only the exact
+bracketed text didn't match a hardcoded generic string.
+
+**Root cause:** the citation check's design conflated two structurally different cases under one
+rule. Retrieved chunks are several distinct, nameable, real sources — citing one that was never
+retrieved is a genuine fabrication, and exact-title matching is the right, precise check. A tool
+call or a research turn is exactly *one* piece of real evidence per turn — there is no second,
+different real source for the model to have picked instead — so there is no meaningful "which of
+several real things did this actually come from" question to ask, and requiring the model to
+reproduce a generic placeholder label verbatim (rather than the far more natural instinct to name
+the actual tool) was never really checking for hallucination at all.
+
+**Fix:** `guardrails/citations.py::verify_citations` now accepts any citation on a turn where
+`tool_output` or `research_output` is present, and keeps the exact-title check only for
+retrieved chunks. Re-verified live: the identical Analyst question now validates on the first
+attempt, `[Employee Directory]` and all. A new regression test
+(`tests/guardrails/test_citations.py::test_a_citation_naming_the_tool_itself_is_allowed_when_a_tool_actually_ran`)
+pins the exact shape that broke, not just the generic-label case the original tests already
+covered.
+
+**Why this generalizes:** the same lesson as trade-offs 20 and 21 — a guardrail's own unit tests
+passing is evidence the guardrail behaves as designed on the inputs it was designed for, not
+evidence it behaves correctly on what a real model actually produces. All three gaps this cycle
+and last were found the same way: running the real thing and looking at what it actually did,
+not trusting that a passing test suite already covered it.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see
