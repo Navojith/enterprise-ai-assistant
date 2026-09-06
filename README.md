@@ -16,13 +16,18 @@ Built for the AI Lead Technical Assessment (`ASSESSMENT.md`).
 
 ## What it does
 
-- **Multi-agent orchestration** — a Supervisor routes to specialized Retrieval, Research and Response
-  agents, with a Validator gating every answer.
+- **Multi-agent orchestration** — a Supervisor routes to specialized Retrieval, Tools and Research
+  agents, with a Response agent composing the answer and a Validator gating every one.
 - **Recursive Language Model (RLM)** — instead of loading whole documents into context, the Research
   agent writes **Python search plans**, executes them in an AST-validated sandbox, decomposes work into
   batches, calls sub-agents recursively, and aggregates the results.
 - **Hybrid retrieval** — dense and sparse Pinecone queries run concurrently and are fused with
   Reciprocal Rank Fusion, with optional reranking and full document attribution.
+- **Prompt-injection defense** — every message is screened at the graph's own entry point (a
+  deterministic heuristic filter, escalating to a schema-constrained classifier only when genuinely
+  ambiguous) before intent classification even runs, and everything the model didn't itself write —
+  retrieved documents, tool results, research findings — is framed as untrusted data it must not
+  follow instructions from.
 - **Transparent execution** — a real-time Agent Activity Panel shows the active graph node, tool calls,
   retrieval status, memory updates and validation results as they happen.
 - **Security by construction** — RBAC is enforced at the tool-execution boundary and the retrieval
@@ -36,20 +41,29 @@ Built for the AI Lead Technical Assessment (`ASSESSMENT.md`).
 ```mermaid
 graph LR
     UI[Streamlit UI] --> API[FastAPI + JWT + rate limit]
-    API --> SUP[Supervisor]
+    API --> GRD[Guardrail<br/>injection screen]
+    GRD --> SUP[Supervisor]
     SUP --> RET[Retrieval agent]
+    SUP --> TLS[Tools node]
     SUP --> RES[Research agent · RLM]
     RET --> RSP[Response agent]
+    TLS --> RSP
     RES --> RSP
     RSP --> VAL[Validator]
     VAL -->|retry| RSP
     VAL -->|pass| UI
     RET --> PC[(Pinecone<br/>dense + sparse)]
     RES --> PC
+    TLS --> MCP[MCP server]
     SUP -.-> OLL[Ollama qwen3:4b]
+    RSP -.-> OLL
     API -.-> PG[(Postgres)]
     SUP -.-> LS[LangSmith]
+    RSP -.-> LS
 ```
+
+Every node in the graph — not just Supervisor and Response, drawn here as representative — calls
+Ollama and traces to LangSmith; the full diagram in `docs/ARCHITECTURE.md` shows every edge.
 
 Full detail, including the request lifecycle and the folder structure, in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
