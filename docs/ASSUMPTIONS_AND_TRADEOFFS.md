@@ -113,12 +113,18 @@ decomposition, batching, recursive sub-agent calls and aggregation.
 deliberately narrow. An unbounded implementation would be both a latency and a safety problem on this
 hardware.
 
-### 6. Docker Compose runs Postgres only
+### 6. Docker Compose ran Postgres only (superseded — see trade-off 23)
 
-**Chosen because:** full containerization was a bonus item, and containerizing the backend, frontend
-and MCP server would consume time without affecting any graded criterion other than the bonus itself.
+**Originally chosen because:** full containerization was a bonus item, and containerizing the
+backend, frontend and MCP server would consume time without affecting any graded criterion other
+than the bonus itself.
 
-**Cost:** the demo requires four processes started manually rather than one `docker compose up`.
+**Original cost:** the demo required four processes started manually rather than one
+`docker compose up`.
+
+**Superseded:** the user later chose to pick this bonus item up. See trade-off 23 for what was
+built and why Ollama specifically was kept out of it. This entry is left in place rather than
+rewritten, per this project's own rule that assumptions are appended to, not silently replaced.
 
 ### 7. Bonus items deliberately not built
 
@@ -635,6 +641,196 @@ evidence it behaves correctly on what a real model actually produces. All three 
 and last were found the same way: running the real thing and looking at what it actually did,
 not trusting that a passing test suite already covered it.
 
+### 23. Full containerization (a bonus item) built after previously being scoped out — Ollama deliberately excluded
+
+Trade-off 6 scoped full containerization out under the original time budget. The user later
+chose to pick it up: `docker-compose.yml` now also builds and runs the backend, MCP server, and
+Streamlit frontend, each from its own `Dockerfile`, alongside the already-containerized
+Postgres — `docker compose up --build` replaces four manually-started terminals with one.
+
+**What stayed out, and why:** Ollama is not containerized. This project already needed live
+measurement to discover that Ollama's default layer-placement heuristic under-used a 4GB laptop
+GPU, fixed by forcing `num_gpu: 99` on every call (`docs/DECISIONS.md` §3,
+`llm/ollama_provider.py`). Windows Docker Desktop GPU passthrough (WSL2 + the NVIDIA Container
+Toolkit) is real, undemonstrated setup risk stacked on top of tuning that was already fragile
+enough to need re-verification natively — a cost not worth paying for a bonus item, when the
+containerized backend and MCP server can simply reach the host's native Ollama over
+`http://host.docker.internal:11434` instead. "Fully dockerized" here means every application
+service; Ollama is a documented, reasoned exception, not an oversight.
+
+**A cross-component import shaped the Dockerfile design:** `frontend/app.py` and
+`frontend/api_client.py` both import `backend.app.observability.events` (the shared
+`ActivityEvent` schema — kept in one place since Cycle 7 specifically so the Agent Activity
+Panel can never drift from what the graph actually emits). This means the frontend's image needs
+the `backend` package tree present too, not just `frontend/`. Rather than fight that coupling
+with a fragile partial `COPY`, all three Dockerfiles (`backend/Dockerfile`,
+`mcp_server/Dockerfile`, `frontend/Dockerfile`) build from the repo root and copy the whole tree,
+installing the same already-shared `requirements.txt` (which already bundled `streamlit`
+alongside backend/MCP dependencies). The cost is a larger, slightly redundant per-image
+footprint; the benefit is ~~zero risk of an import that only breaks inside a container~~ **this
+last claim turned out to be wrong — see trade-off 25.** Copying the whole tree solved *file
+presence*, not the actual problem: `backend.app` being importable at all requires its heavy
+dependency graph and `Settings`' environment variables, and separately, Streamlit's own script
+runner doesn't put the repo root on `sys.path` the way `python -m ...` does. The frontend
+container failed with `ModuleNotFoundError: No module named 'backend'` the first time this was
+actually run, not merely built. Left here uncorrected in the original text, per this project's
+own append-don't-rewrite rule for this file — trade-off 25 has the real fix.
+
+**No application code changed.** `mcp_server_host` already served two roles under one setting
+name — the MCP server's own bind address, and the backend client's connect address — purely
+through which process's `Settings` instance read it. Compose exploits this directly: the
+`mcp_server` container's environment sets it to `0.0.0.0` (bind all interfaces), while the
+`backend` container's independent environment sets the *same variable name* to `mcp_server` (the
+compose service's DNS name) — two containers, two separate environments, no collision. Every
+other host that differs between native and containerized runs (`DB_HOST`/`DB_PORT`,
+`OLLAMA_BASE_URL`, `BACKEND_URL`) was already a plain `pydantic-settings` env var with no
+hardcoded fallback in application logic, confirmed by dedicated `Explore` research before writing
+a single Dockerfile rather than assumed. `.env`'s own values (used by the still-documented native
+run path) are left untouched; `docker-compose.yml`'s `environment:` blocks override only the
+containerized services, since Compose's `environment:` takes precedence over `env_file:` for the
+same key.
+
+**Verified live:** `docker compose up --build -d` brought up all four containers healthy; the
+backend's startup log showed `mcp_client_connected` at `http://mcp_server:8100/mcp` and
+`ollama_warmup_succeeded`, confirming both the compose-network DNS name and `host.docker.internal`
+resolved correctly; a full retrieval chat turn (Viewer role) completed end to end through the
+containerized frontend in ~15 seconds (guardrail → supervisor → retrieval → response → validator,
+passed). The MCP-tool route's reliability under containerization is its own, separately
+significant finding — trade-off 24.
+
+### 24. `host.docker.internal` intermittently stalls LLM calls from the containerized backend to native Ollama — found, partially fixed, honestly still a residual limitation
+
+Live-verifying trade-off 23's containerized deployment (not just building it) surfaced a real
+reliability problem this project's own live-testing discipline caught rather than shipped
+unnoticed: an Analyst's MCP-tool-route question (`"Use the employee directory tool..."`) failed
+with `LLMTimeoutError` on the argument-filling call, repeatedly, when run through the
+containerized backend — a turn that has been reliable since Cycle 4. This is recorded in full,
+including the investigation's false starts, because the honest version is more useful to a future
+session than a cleaned-up summary that skips the wrong turns.
+
+**First hypothesis, disproven:** schema complexity or model-side slowness. Timed directly against
+Ollama: the identical prompt and schema returned in under a second, repeatedly, when called
+without going through the container. Container CPU/memory usage was idle
+(`docker stats`), and GPU utilization was 0% between calls — nothing was resource-starved.
+
+**Second hypothesis, confirmed then partially disproven:** a container reaching Ollama over
+Docker Desktop's `host.docker.internal` NAT hits a real, reproducible, high (~80%) chance that a
+*streamed* HTTP response stalls after its headers arrive, confirmed by directly reproducing it
+against the raw Ollama HTTP API five separate times (repeatable, not a one-off) — while an
+identical *non-streaming* request to the same endpoint succeeded in under a second on the same
+run. This mattered because `ChatOllama` (used for every LLM call via `llm/ollama_provider.py`)
+always sends Ollama's streamed chat API internally and aggregates the chunks itself, even for a
+single `ainvoke()` — so every containerized LLM call carried this risk, not just the tool route
+that happened to surface it first.
+
+**The fix built, with the user's explicit direction on how to scope it:** asked how to proceed
+rather than silently choosing, since the first proposed mitigation (a bounded retry) turned out,
+on honest re-measurement, not to be enough on its own (see below) — the user's answer was to keep
+the fix inside the existing `LLMProvider`/`OllamaProvider` abstraction rather than scattering raw
+Ollama calls through calling code, matching the existing timeout/error-handling/logging/
+observability semantics rather than a shortcut. `OllamaProvider.astructured()` now calls Ollama's
+non-streaming API directly (`_call_non_streaming`, reusing `ChatOllama`'s own request-parameter
+building so GPU/format/timeout settings can't drift from `astream()`'s), with a hand-rolled
+LangSmith trace (`AsyncCallbackManager` + `ensure_config()`, reading the same ambient callback
+context a real traced `Runnable` call relies on) so this path keeps full observability coverage.
+`astream()` (token-by-token UI streaming) is untouched — it is supposed to stream, and native,
+non-containerized deployments never cross the NAT boundary that causes any of this, so nothing
+here changes their behavior or reliability.
+
+**A real miscalculation, corrected rather than left standing:** the first fix proposed to the
+user was "add a bounded retry," framed as cutting the failure rate from ~1-in-5 to ~1-in-25. That
+was wrong — a read of the same test data backwards. The actual single-attempt hang rate was
+~80%, not ~20%, meaning two attempts (one retry) still failed roughly 64% of the time, not 4%.
+This was caught by re-measuring after building the retry, seeing it fail live, and re-deriving
+the real odds from the original data rather than trusting the first pass — the retry alone was
+built, tested, found wanting, and escalated back to the user with the corrected numbers rather
+than being reported as solved.
+
+**What re-testing after the non-streaming fix found — the honest, still-incomplete picture:**
+switching to non-streaming is a real, verified improvement (the specific ~80% streamed-stall
+mechanism no longer applies), but it is not a complete fix. Further live testing found
+`host.docker.internal` also goes through bursty stretches — lasting several consecutive
+requests, non-streaming included — where the NAT path stalls regardless of request shape,
+confirmed by comparing a direct host-to-Ollama call (fast) against the identical call routed
+through the container (stalled) during the same bad stretch, then watching both recover minutes
+later with no code or configuration change. This looks like a genuine Docker Desktop for Windows
+networking limitation in how `host.docker.internal` handles sustained load, not something this
+provider's request shape, retry count, or timeout value fully controls.
+
+**What this means in practice:** the "tools"/MCP route, and in principle any LLM call, can
+occasionally take one or two full timeout cycles (up to a minute) to complete when run through
+the Docker Compose deployment, in a way that never happens on the native run path (which never
+crosses this NAT boundary at all). This is a real, disclosed limitation of choosing to keep Ollama
+native rather than a hidden one — a demo relying on the containerized deployment's MCP-tool route
+should budget for an occasional retry, or use the native run for that specific segment if a
+guaranteed first-attempt success matters more than demonstrating the full container stack in one
+command.
+
+### 25. The frontend's one deliberate `backend.app` import was a real coupling bug, not a style choice — found live, fixed by extracting a `shared/` package
+
+Trade-off 23's own text claimed copying the whole repo tree into every service image gave "zero
+risk of an import that only breaks inside a container." That claim was wrong, found the first
+time the containerized frontend was actually run (not just built): it crashed on startup with
+
+```
+ModuleNotFoundError: No module named 'backend'
+Traceback:
+File "/app/frontend/app.py", line 25, in <module>
+    from backend.app.observability.events import ActivityEvent, ActivityEventType
+```
+
+**Two distinct problems, not one, both real:**
+
+1. **A genuine coupling bug.** `frontend/api_client.py`'s own docstring already documented a
+   policy — "the frontend deliberately does *not* import anything from `backend.app` except the
+   one typed contract both sides already share" — but that one exception was worse than it
+   looked: importing `backend.app.observability.events` executes `backend/__init__.py` and
+   `backend/app/__init__.py` first, pulling in FastAPI, LangGraph, Pinecone and Postgres client
+   libraries and requiring `Settings`' environment variables to be satisfiable, just to reach two
+   small `pydantic` classes. `mcp_server/server.py` had the identical pattern (`from
+   backend.app.core.config import get_settings`, for three settings fields) — undiscovered until
+   this investigation, because it happened to work: `python -m mcp_server` puts the working
+   directory on `sys.path`, masking the same underlying coupling that broke the frontend outright.
+2. **A separate, purely mechanical import-path problem.** Even a fully decoupled top-level import
+   would still fail under `streamlit run frontend/app.py`: Streamlit's script runner puts the
+   *script's own directory* (`/app/frontend`) on `sys.path`, not the working directory
+   (`/app`) the way `python -m ...` or a bare `python script.py` does. A repo-root-relative
+   absolute import has nothing to resolve against unless something explicitly puts the repo root
+   back on the path.
+
+**Why both had to be fixed, not just one:** fixing only #2 (e.g. `ENV PYTHONPATH=/app` alone)
+would have made the crash go away while leaving the actual defect in place — the frontend would
+still silently depend on the entire backend dependency graph and its environment variables,
+correct today only because both happen to be present in the same image, and fragile the moment
+that stops being true (a leaner frontend image, a backend-only env var required at import time,
+a future service that copies less). Fixing only #1 without #2 would still crash under Streamlit
+even after decoupling. **The user caught this in a live run and asked for the coupling itself to
+be fixed** — not a `PYTHONPATH` patch — while keeping the fix inside a clean shared abstraction
+rather than duplicating the schema by hand.
+
+**The fix:** a new top-level `shared/` package, `shared/events.py`, holding the canonical
+`ActivityEvent`/`ActivityEventType` definitions (pure `pydantic`, no other dependency).
+`backend/app/observability/events.py` now just re-exports from it, so all nine existing backend
+call sites (`agents/nodes/*.py`, `api/v1/chat.py`, `rlm/api.py`, ...) keep working completely
+unchanged; only `frontend/app.py`, `frontend/api_client.py`, and their tests were updated to
+import `shared.events` directly. Separately, `mcp_server/server.py`'s coupling was fixed the same
+way: a new `mcp_server/config.py::MCPServerSettings` owns just the three fields
+(`mcp_server_host`/`port`/`path`) the server itself binds with, reading the identical env var
+names from the identical `.env` file as `backend/app/core/config.py::Settings` — the "read by
+both sides so they can't disagree" property is preserved through the shared environment, not
+through one process importing the other's settings class. `frontend/Dockerfile` also gained
+`ENV PYTHONPATH=/app`, addressing problem #2 — needed regardless of how clean the import is,
+since it's a property of how Streamlit resolves scripts, not of what the script imports.
+
+**Verified live:** rebuilt the frontend and MCP server images, brought the full stack down and
+back up from scratch (`docker compose down && docker compose up -d`). The frontend container's
+logs show a clean Streamlit startup with no `ModuleNotFoundError`, `curl` against
+`http://localhost:8501` returns the rendered page (not an error page), the backend's startup log
+still shows `mcp_client_connected` and `ollama_warmup_succeeded`, the MCP server's own logs show
+it serving real requests from the backend over the compose network, and a full chat turn through
+the raw API completed end to end (`event: done`, ~20s) with no regression from any of these
+changes.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see
@@ -653,3 +849,5 @@ not trusting that a passing test suite already covered it.
 - **No evaluation harness.** There is no automated answer-quality benchmark; correctness is verified
   by the acceptance criteria in `docs/DELIVERY_PLAN.md` rather than by scored evaluation.
 - **Single region.** Pinecone Starter is limited to AWS `us-east-1`.
+- **Docker Compose deployment only: intermittent `host.docker.internal` stalls to native
+  Ollama.** See trade-off 24. Not present on the native run path.

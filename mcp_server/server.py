@@ -21,7 +21,7 @@ from typing import Any
 
 from mcp.server.mcpserver.server import MCPServer
 
-from backend.app.core.config import get_settings
+from mcp_server.config import get_mcp_server_settings
 from mcp_server.data import EMPLOYEES, INCIDENTS, SERVICES, Employee, IncidentRecord, Service
 
 server = MCPServer(
@@ -93,8 +93,11 @@ def run() -> None:
     """Entry point for `python -m mcp_server`. Streamable HTTP, not stdio — this process runs
     standalone in its own terminal (`docs/SETUP.md` step 4), not spawned as a child of the
     backend, so the backend connects to it over HTTP the same way it would to any other network
-    dependency (Pinecone, Ollama)."""
-    settings = get_settings()
+    dependency (Pinecone, Ollama). Reads its own minimal `MCPServerSettings`
+    (`mcp_server/config.py`), not the backend's `Settings` — this process has no other need for
+    anything the backend imports, and importing it anyway was a real coupling bug; see that
+    module's docstring."""
+    settings = get_mcp_server_settings()
     server.run(
         transport="streamable-http",
         host=settings.mcp_server_host,

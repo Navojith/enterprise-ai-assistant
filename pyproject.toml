@@ -28,7 +28,7 @@ select = [
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["backend", "scripts", "mcp_server", "frontend"]
+known-first-party = ["backend", "scripts", "mcp_server", "frontend", "shared"]
 
 # FastAPI's `Depends(...)` in a parameter default is the framework's documented DI pattern —
 # it is evaluated once per request by FastAPI itself, not once at import time like the mutable-
@@ -41,7 +41,7 @@ quote-style = "double"
 
 [tool.mypy]
 python_version = "3.11"
-files = ["backend", "scripts", "mcp_server", "tests", "frontend"]
+files = ["backend", "scripts", "mcp_server", "tests", "frontend", "shared"]
 strict = true
 plugins = ["pydantic.mypy"]
 

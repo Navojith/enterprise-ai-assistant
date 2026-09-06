@@ -5,8 +5,9 @@ ASSESSMENT.md asks for "a lightweight chat interface" where "UI beauty is not im
 over `api_client.py`'s typed HTTP/SSE client, not a second place business logic lives. Every
 fact the panel shows (current node, tool calls, retrieval status, memory updates, validation
 results) is a direct render of an `ActivityEvent` the backend's own graph emitted
-(`backend/app/observability/events.py`) — this file never infers or narrates what the agent is
-doing, only displays it, so the panel can never drift out of sync with what actually happened.
+(`shared/events.py` — the frontend imports this shared contract, not `backend.app` itself; see
+that module's docstring for why) — this file never infers or narrates what the agent is doing,
+only displays it, so the panel can never drift out of sync with what actually happened.
 
 Run with `streamlit run frontend/app.py` (see `docs/SETUP.md`). `BACKEND_URL` is read from the
 environment (default `http://localhost:8000`) rather than hardcoded, so the same file works
@@ -22,7 +23,6 @@ from typing import Any
 import httpx
 import streamlit as st
 
-from backend.app.observability.events import ActivityEvent, ActivityEventType
 from frontend.api_client import (
     AuthenticationFailedError,
     BackendError,
@@ -33,6 +33,7 @@ from frontend.api_client import (
     login,
     stream_chat_turn,
 )
+from shared.events import ActivityEvent, ActivityEventType
 
 DEFAULT_BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 

@@ -95,11 +95,13 @@ enterprise-ai-assistant/
 ├── ASSESSMENT.md                    # assignment brief — READ ONLY
 ├── CLAUDE.md                        # session entry point
 ├── README.md
-├── docker-compose.yml               # Postgres only
+├── docker-compose.yml               # Postgres, backend, MCP server, frontend — Ollama stays native
+├── .dockerignore
 ├── requirements.txt
 ├── pyproject.toml                   # ruff / mypy / pytest config
 ├── .env.example
 │
+├── backend/Dockerfile                # builds from the repo root — see its header comment
 ├── backend/app/
 │   ├── main.py                      # app factory, lifespan (Pinecone, Postgres, Ollama warm-up)
 │   ├── api/
@@ -159,13 +161,18 @@ enterprise-ai-assistant/
 │   │   └── brand.py                 # commercial-bank persona and safety
 │   └── observability/
 │       ├── langsmith.py             # explicit LangChainTracer callback + env wiring (Cycle 7)
-│       └── events.py                # typed activity event bus feeding the UI
+│       └── events.py                # re-exports ActivityEvent from shared/events.py (trade-off 25)
 │
 ├── mcp_server/                      # mcp.server.mcpserver.MCPServer: employee directory,
-│                                     # service catalog, incidents (Streamable HTTP) — Cycle 4
+│   │                                 # service catalog, incidents (Streamable HTTP) — Cycle 4
+│   ├── Dockerfile                   # builds from the repo root, same pattern as backend/Dockerfile
+│   └── config.py                    # this process's own settings — no import of backend.app
 ├── frontend/                        # Streamlit chat + Agent Activity Panel — Cycle 7
+│   ├── Dockerfile                   # builds from the repo root; sets PYTHONPATH=/app for Streamlit
 │   ├── app.py                       # thin rendering layer: login, chat, activity panel
-│   └── api_client.py                # typed HTTP/SSE client, reuses ActivityEvent from backend
+│   └── api_client.py                # typed HTTP/SSE client, reuses ActivityEvent from shared/
+├── shared/                          # code genuinely shared across processes — nothing else
+│   └── events.py                    # ActivityEvent/ActivityEventType: the one cross-process contract
 ├── data/seed/                       # ~60 generated enterprise documents
 ├── scripts/                         # ingest, seed generation, admin utilities
 ├── tests/

@@ -16,7 +16,6 @@ from typing import Any
 import httpx
 import pytest
 
-from backend.app.observability.events import ActivityEvent, ActivityEventType
 from frontend.api_client import (
     AuthenticationFailedError,
     BackendUnreachableError,
@@ -29,6 +28,7 @@ from frontend.api_client import (
     login,
     stream_chat_turn,
 )
+from shared.events import ActivityEvent, ActivityEventType
 
 
 def test_parse_sse_lines_pairs_event_and_data_lines_across_frames() -> None:

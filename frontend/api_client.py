@@ -5,12 +5,17 @@ without a running Streamlit process or a running backend — `app.py` imports th
 does nothing but render state (`docs/DECISIONS.md` §8's "production-grade code" bar applies to
 the frontend too, not only `backend/`).
 
-The frontend deliberately does **not** import anything from `backend.app` except the one typed
-contract both sides already share, `observability.events.ActivityEvent` — reusing it here is
-what lets the Agent Activity Panel render the exact same shape a graph node emits rather than a
-hand-maintained duplicate that could quietly drift out of sync with it. Everything else (auth,
-RBAC, error codes) is addressed by field name only, deliberately loosely coupled to a second
-process reached only over HTTP.
+The frontend deliberately does **not** import anything from `backend.app` at all — including the
+one typed contract both sides share, `ActivityEvent`, which now lives in the standalone
+`shared/events.py` (see that module's docstring: this used to be an exception to this same rule,
+importing `backend.app.observability.events` directly, and it was a real bug — that import
+dragged in FastAPI/LangGraph/Pinecone/Postgres and `Settings`' required environment variables
+just to reach two `pydantic` classes, and broke outright under `streamlit run` in Docker).
+Reusing the shared type is still what lets the Agent Activity Panel render the exact same shape
+a graph node emits rather than a hand-maintained duplicate that could quietly drift out of sync
+with it — the fix removed the coupling, not the reuse. Everything else (auth, RBAC, error codes)
+is addressed by field name only, deliberately loosely coupled to a second process reached only
+over HTTP.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
-from backend.app.observability.events import ActivityEvent
+from shared.events import ActivityEvent
 
 _DONE_EVENT_NAME = "done"
 

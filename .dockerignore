@@ -1,0 +1,19 @@
+# Shared by every service's Dockerfile — they all build from this directory as context
+# (see backend/Dockerfile's header comment for why).
+#
+# data/seed/ and scripts/ are deliberately NOT excluded: the backend image needs both to
+# support running `docker compose run --rm backend python -m scripts.ingest` as the
+# containerized equivalent of the native ingestion step (docs/SETUP.md).
+
+.git/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.env
+htmlcov/
+.coverage
+*.egg-info/

@@ -38,9 +38,10 @@ Code Quality at 5% each receive correct-but-lean implementations.
 | Frontend | Streamlit consuming SSE | Mandated by spec. |
 | Observability | LangSmith (Developer tier) | Mandated by spec. |
 
-**In scope beyond the required minimum:** MCP server, reranking layer.
+**In scope beyond the required minimum:** MCP server, reranking layer, full containerization
+(§7 below — picked back up after initially being scoped out).
 **Explicitly out of scope:** human-in-the-loop approval, long-term memory, answer-quality feedback
-loop, full containerization of application services. These are bonus items sacrificed to the time budget.
+loop. These are bonus items sacrificed to the time budget.
 
 ---
 
@@ -186,9 +187,54 @@ Two decisions were taken in different rounds and appeared to conflict. Both are 
    be added by configuration alone. Because inference is local there are no rate-limit errors to
    handle, so the chain guards **timeouts, model-load failures and malformed output** instead.
 
-2. **Postgres in Docker Compose vs. containerization not selected.** `docker-compose.yml` runs
-   **Postgres only**. The backend, Streamlit frontend and MCP server run natively against it. Full
-   containerization was a bonus item that was not selected.
+2. **Postgres-only Docker Compose vs. full containerization.** Originally `docker-compose.yml` ran
+   **Postgres only**, with the backend, frontend and MCP server running natively — full
+   containerization was a bonus item not selected under the initial time budget. That was later
+   picked back up: `docker-compose.yml` now also builds and runs the backend, MCP server, and
+   frontend, each from its own `Dockerfile` (`backend/Dockerfile`, `mcp_server/Dockerfile`,
+   `frontend/Dockerfile`). Three implementation choices, each deliberate:
+   - **Ollama stays native**, reached from containers via `http://host.docker.internal:11434`.
+     This project's GPU-residency tuning (`num_gpu: 99` in `llm/ollama_provider.py`, forced
+     because Ollama's own layer-placement heuristic under-used a 4GB GPU by default — §3 above)
+     was already fragile enough to need live measurement natively. Windows Docker Desktop GPU
+     passthrough (WSL2 + the NVIDIA Container Toolkit) would add real, undemonstrated setup risk
+     on top of that for a bonus item, so "fully dockerized" here means every *application*
+     service, with Ollama a documented, reasoned exception rather than an oversight.
+   - **Every service Dockerfile builds from the repo root, copying the whole tree**, not just its
+     own directory — needed regardless of the point below, since the three services' absolute
+     imports are all rooted at the repo root. This trades a larger per-image footprint for zero
+     risk of a *file* being missing inside a container.
+   - **`frontend/app.py` and `frontend/api_client.py` no longer import `backend.app` at all**
+     (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 25 — corrects an earlier version of this same
+     bullet, which claimed copying the whole tree made such an import risk-free; that was wrong,
+     found live when the containerized frontend actually crashed with `ModuleNotFoundError: No
+     module named 'backend'`). The shared `ActivityEvent`/`ActivityEventType` contract (kept in
+     one place since Cycle 7 specifically to avoid a hand-maintained duplicate) now lives in a
+     new top-level `shared/events.py` with no dependency beyond `pydantic`;
+     `backend/app/observability/events.py` re-exports it so every existing backend call site is
+     unaffected. `mcp_server/server.py`'s equivalent (but previously unnoticed, because
+     `python -m mcp_server` happened to mask it) coupling to `backend.app.core.config` was fixed
+     the same way, with its own minimal `mcp_server/config.py`. `frontend/Dockerfile` separately
+     gained `ENV PYTHONPATH=/app`, since Streamlit's script runner doesn't put the repo root on
+     `sys.path` the way `python -m ...` does — a second, independent problem the import fix alone
+     would not have solved.
+   - **No application code changed for the networking/config layer.** `mcp_server_host` already
+     serves two roles from one setting name — the server's own bind address, and the client's
+     connect address — purely through which process's `Settings` instance reads it. Compose
+     exploits this directly: the `mcp_server` container sets it to `0.0.0.0` (bind all
+     interfaces) while the `backend` container sets the *same variable name* to `mcp_server`
+     (the compose service's DNS name), since each container gets its own independent
+     environment. Every other host difference between native and containerized runs
+     (`DB_HOST`/`DB_PORT`, `OLLAMA_BASE_URL`, `BACKEND_URL`) was already a plain env var with no
+     hardcoded fallback in application logic. One application code change *was* needed later,
+     for a different reason: live-verifying the containerized deployment (not just building it)
+     found `host.docker.internal` intermittently stalling LLM calls to the intentionally-native
+     Ollama — `llm/ollama_provider.py::astructured` now calls Ollama's non-streaming API
+     directly instead of through `ChatOllama`'s always-streamed internal path, at the user's
+     explicit direction to fix this inside the existing provider abstraction rather than around
+     it. This is a real, verified improvement, not a complete fix — `docs/ASSUMPTIONS_AND_
+     TRADEOFFS.md` trade-off 24 has the full, honest reliability picture, including the
+     residual, unresolved intermittency this doesn't eliminate.
 
 ---
 

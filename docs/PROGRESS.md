@@ -467,10 +467,99 @@ From `ASSESSMENT.md`. Tracked separately because these are graded independently 
 
 ---
 
+## Bonus points
+
+From `ASSESSMENT.md`'s bonus section. Tracked separately since they're graded independently of
+the 8 core cycles above.
+
+| Item | Status |
+| --- | --- |
+| Multi-agent collaboration (state management, failure handling, butterfly effect) | ✅ Done — core to Cycles 3–5's architecture, not a bolt-on |
+| Reranking layer | ✅ Done — Cycle 1 |
+| Containerized deployment (Docker Compose) | ✅ Done, with a disclosed residual limitation — `docker-compose.yml` now builds and runs Postgres, backend, MCP server, and frontend; Ollama deliberately stays native (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 23). Live verification found and partially fixed an intermittent `host.docker.internal`-to-Ollama networking stall (trade-off 24) — real improvement, not fully eliminated; native run is unaffected. Also found and fully fixed a real frontend↔backend coupling bug that crashed the containerized frontend outright (trade-off 25) |
+| Human-in-the-loop approval node | ❌ Not built — scoped out, `docs/DECISIONS.md` §2 |
+| Long-term memory | ❌ Not built (session/thread-scoped memory only) — `docs/DECISIONS.md` §12 |
+| Feedback loop for answer quality | ❌ Not built |
+
+All three remaining items were assessed as costing **$0 beyond the current free tier** if built —
+each reuses infrastructure already provisioned for this project (the existing free Postgres
+container, the existing free Pinecone Starter account, or LangGraph's own `interrupt()`
+mechanism) rather than requiring any new paid service.
+
+---
+
 ## Session log
 
 Newest first. One line per meaningful change.
 
+- **2026-09-06** — Fixed a real coupling bug the user hit running the just-built containerized
+  frontend: it crashed on startup with `ModuleNotFoundError: No module named 'backend'`
+  (`from backend.app.observability.events import ActivityEvent, ActivityEventType` in
+  `frontend/app.py`). The user's own framing — "fix the coupling," not "make the crash go away" —
+  set the scope: extracted the shared `ActivityEvent`/`ActivityEventType` contract into a new,
+  dependency-free top-level `shared/events.py`; `backend/app/observability/events.py` now
+  re-exports it so all nine existing backend call sites are unaffected, while `frontend/app.py`,
+  `frontend/api_client.py`, and their tests import `shared.events` directly, with no dependency
+  on `backend.app` (its full FastAPI/LangGraph/Pinecone/Postgres graph and required env vars) at
+  all. Investigating this surfaced the identical anti-pattern already latent in
+  `mcp_server/server.py` (`from backend.app.core.config import get_settings`, for three fields),
+  masked until now only because `python -m mcp_server`'s `-m` invocation happens to put the
+  working directory on `sys.path` — fixed the same way, with a new minimal
+  `mcp_server/config.py::MCPServerSettings` reading the identical `.env` var names. A second,
+  independent problem needed its own fix: Streamlit's script runner puts the *script's own*
+  directory on `sys.path`, not the working directory, so even a fully decoupled absolute import
+  would still have failed under `streamlit run` — `frontend/Dockerfile` now sets
+  `ENV PYTHONPATH=/app`. Corrected two claims in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 23
+  and `docs/DECISIONS.md` §7 that had asserted copying the whole repo tree into each image made
+  such an import "zero risk" — left visibly corrected rather than silently rewritten, per this
+  project's own append-don't-rewrite rule, with the real story in a new trade-off 25. 4 new tests
+  (`tests/mcp_server/test_config.py`, 342 total, up from 339 after the previous session's LLM
+  retry work); `ruff`, `ruff format`, `mypy --strict` all pass clean. Verified live: rebuilt the
+  frontend and MCP server images, brought the full stack down and back up from scratch, confirmed
+  the frontend's logs show a clean Streamlit startup with no import error and the rendered page
+  loads over HTTP, the backend's `mcp_client_connected`/`ollama_warmup_succeeded` startup lines
+  are unaffected, the MCP server's own logs show it serving real requests over the compose
+  network, and a full chat turn through the raw API completed end to end with no regression.
+- **2026-09-06** — Picked up the "containerized deployment" bonus item: built `backend/Dockerfile`,
+  `mcp_server/Dockerfile`, `frontend/Dockerfile` and extended `docker-compose.yml` so
+  `docker compose up --build` runs Postgres, the backend, the MCP server, and the frontend
+  together, with Ollama deliberately kept native (agreed with the user up front — Windows Docker
+  Desktop GPU passthrough was assessed as real, undemonstrated risk on top of already-fragile
+  GPU-residency tuning, for a bonus item). No application code changed for the networking layer
+  itself — every host that differs between native and containerized runs was already a plain env
+  var. Full detail in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 23 and `docs/DECISIONS.md` §7.
+  Live verification (not just a successful build) then found a real reliability problem this
+  project's own live-testing discipline caught before calling the work done: the MCP-tool route
+  repeatedly failed with `LLMTimeoutError` through the containerized backend, root-caused to a
+  reproducible ~80% chance that a *streamed* HTTP response from a container to the intentionally-
+  native Ollama over Docker Desktop's `host.docker.internal` NAT stalls after its headers arrive —
+  confirmed directly against the raw Ollama HTTP API, repeatable across five separate test runs.
+  Asked the user how to scope the fix rather than choosing unilaterally; a first attempt (a
+  bounded retry) was proposed with an initially wrong estimate of the odds (read the same test
+  data backwards — the true single-attempt hang rate was ~80%, not ~20%), caught by re-measuring
+  after building it and finding the retry alone still failed most of the time, then corrected and
+  re-escalated to the user with the real numbers rather than reported as solved. The user's actual
+  direction — keep the fix inside the existing `LLMProvider`/`OllamaProvider` abstraction, match
+  the existing timeout/error-handling/logging/observability semantics, validate JSON and fail
+  safely on malformed output — is what shipped: `OllamaProvider.astructured()` now calls Ollama's
+  non-streaming API directly (`_call_non_streaming`, reusing `ChatOllama`'s own request-parameter
+  building so GPU/format/timeout settings can't drift from `astream()`'s), with a hand-rolled
+  LangSmith trace via `AsyncCallbackManager` + `ensure_config()` so this path keeps full
+  observability coverage. This is a real, verified improvement — the specific streamed-stall
+  mechanism no longer applies — but honestly **not a complete fix**: further live testing found
+  `host.docker.internal` also goes through bursty stretches, lasting several consecutive
+  requests, where even non-streaming calls stall regardless of request shape, which looks like a
+  genuine Docker Desktop for Windows networking limitation rather than anything this provider's
+  request shape controls. Documented in full, including the wrong turns, in
+  `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 24 and as a new "Known limitations" bullet,
+  specifically so a future session trusts this record over a cleaned-up summary that skips how it
+  was actually found. 4 new/rewritten tests for `OllamaProvider.astructured`'s retry and
+  non-streaming behavior (339 total, up from 335); `ruff`, `ruff format`, `mypy --strict` all pass
+  clean. Live-verified end to end: all four containers healthy, compose-network DNS
+  (`mcp_client_connected` at `http://mcp_server:8100/mcp`) and `host.docker.internal` (`ollama_
+  warmup_succeeded`) both resolving correctly, a full retrieval turn completing in ~15s through
+  the containerized frontend, and the MCP-tool route succeeding on a real run after the fix
+  (alongside the disclosed residual intermittency above).
 - **2026-09-06** — Wrote `docs/DEMO_SCRIPT.md` (a minute-by-minute, criteria-mapped script for
   the mandatory 45-minute demo video) and, before handing it off, dry-ran every scripted message
   against the live stack rather than trusting the script's own prose was accurate. That dry run

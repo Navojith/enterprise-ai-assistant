@@ -52,10 +52,11 @@ limited to AWS `us-east-1`.
 > ⏰ **Free-tier traces are retained for 14 days.** The demo video must show live traces, so record it
 > within 14 days of the run you intend to show.
 
-### 4. Docker (Postgres)
+### 4. Docker
 
-Docker Desktop is already installed on the development machine (29.6.1). Only Postgres is
-containerized; the backend, frontend and MCP server run natively.
+Docker Desktop is already installed on the development machine (29.6.1). Postgres, the backend,
+the MCP server, and the Streamlit frontend are all containerized (`docker-compose.yml`). Ollama
+is the one deliberate exception — see the "Run everything with Docker Compose" section below.
 
 ### 5. Python
 
@@ -116,7 +117,43 @@ pip install -r requirements.txt
 
 ## Running
 
-Start each in its own terminal, in this order:
+Two ways to run the stack. Both need Ollama running natively first — it is intentionally not
+containerized (see below).
+
+### Option A — Docker Compose (one command)
+
+```bash
+# Ollama still runs on the host — see "Why Ollama isn't containerized" below.
+ollama serve                      # if not already running as a service
+
+# (optional) Regenerate the seed corpus — data/seed/ is already committed, so this is only
+# needed after changing scripts/generate_seed_corpus.py. Deterministic: byte-identical output.
+python -m scripts.generate_seed_corpus
+
+docker compose up --build -d
+
+# First run only, or after changing seed documents: ingest the corpus into Pinecone (creates
+# the indexes on first run, and is idempotent — re-running re-embeds nothing unchanged). Runs
+# inside the backend image so it shares its dependencies and doesn't need a local venv.
+docker compose run --rm backend python -m scripts.ingest
+```
+
+This starts Postgres, the backend, the MCP server, and the frontend together, all reachable at
+the same ports as the native run below. `docker compose logs -f backend` shows the same startup
+log lines (`langsmith_tracing_enabled`, `mcp_client_connected`, `ollama_warmup_succeeded`) as a
+native run.
+
+**Why Ollama isn't containerized:** this project already needed live measurement to get
+`qwen3:4b` fully GPU-resident on a 4GB laptop GPU (`num_gpu: 99`, forced in
+`backend/app/llm/ollama_provider.py` — see `docs/DECISIONS.md` §3). Windows Docker Desktop GPU
+passthrough (WSL2 + the NVIDIA Container Toolkit) is real, undemonstrated setup risk on top of
+that already-fragile tuning, for a bonus item — so the backend and MCP server containers reach
+the host's native Ollama via `http://host.docker.internal:11434` instead. Full reasoning in
+`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 23.
+
+### Option B — native (one terminal per process)
+
+Useful for debugging a single service in isolation.
 
 ```bash
 # 1. Postgres
@@ -142,7 +179,7 @@ python -m mcp_server
 streamlit run frontend/app.py
 ```
 
-The UI is then at <http://localhost:8501> and the API at <http://localhost:8000>
+Either way, the UI ends up at <http://localhost:8501> and the API at <http://localhost:8000>
 (docs at `/docs`).
 
 ---
@@ -181,3 +218,6 @@ returns the resolved `{username, role}` and is a quick way to confirm a token wo
 | Postgres connection succeeds but returns `password authentication failed for user "postgres"` even though `docker compose ps` shows the container healthy | Something else on the machine — commonly a natively-installed Postgres — is already listening on port 5432 and is shadowing the container on `localhost`. This project's compose file deliberately publishes the container on host port **5433** (`DB_PORT` in `.env.example` matches, and `docker-compose.yml` reads the same variable); if you changed it back to 5432, check `docker port enterprise-ai-assistant-postgres` and whatever else owns 5432 before assuming the container is broken. |
 | Reranking silently inactive | Expected in development (`RERANK_ENABLED=false`), or the monthly budget guard has tripped. |
 | Postgres connection failures | `docker compose ps` — confirm the container is healthy. |
+| Containerized backend logs an Ollama warm-up failure / degrades to a fallback error | Ollama isn't running natively on the host, or `host.docker.internal` isn't resolving. Confirm `ollama serve` is up on the host first; on native Linux Docker Engine (not Windows/Mac Docker Desktop) confirm `docker-compose.yml`'s `extra_hosts: host.docker.internal:host-gateway` took effect (`docker exec enterprise-ai-assistant-backend getent hosts host.docker.internal`). |
+| Containerized backend can't reach Postgres or the MCP server | Compose-network traffic uses service names and *internal* ports (`postgres:5432`, `mcp_server:8100`), not the host-published ones (`localhost:5433`) — `docker-compose.yml`'s `backend` service overrides `DB_HOST`/`DB_PORT`/`MCP_SERVER_HOST` for exactly this reason. Confirm those overrides are present rather than editing `.env`, which native runs still depend on. |
+| A chat turn through the **containerized** backend occasionally fails with `llm_timeout` (an immediate retry succeeds) | A disclosed, unresolved limitation, not a bug to chase — `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 24. Docker Desktop's `host.docker.internal` NAT intermittently stalls calls to the intentionally-native Ollama, in bursts lasting several requests; `llm/ollama_provider.py` already mitigates the most common form of this, but doesn't fully eliminate it. Only affects the Docker Compose deployment — the native run path never crosses this NAT boundary. If a demo segment needs a guaranteed first-attempt success, run that segment natively instead. |

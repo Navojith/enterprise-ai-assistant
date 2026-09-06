@@ -78,17 +78,20 @@ Full instructions — including free-tier account setup and the cost guards — 
 [`docs/SETUP.md`](docs/SETUP.md).
 
 ```bash
-# Prerequisites: Ollama + qwen3:4b, Pinecone key, LangSmith key
-python -m venv .venv && .venv\Scripts\activate
-pip install -r requirements.txt
+# Prerequisites: Ollama + qwen3:4b (running natively — see below), Pinecone key, LangSmith key
 cp .env.example .env          # then fill in the three API keys
+ollama serve                  # if not already running as a service
 
-docker compose up -d postgres
-python -m scripts.ingest
-uvicorn backend.app.main:app --reload --port 8000
-python -m mcp_server
-streamlit run frontend/app.py
+docker compose up --build -d
+docker compose run --rm backend python -m scripts.ingest   # first run only
 ```
+
+Postgres, the backend, the MCP server, and the frontend all start together. Ollama is the one
+service that stays native — reached over `http://host.docker.internal:11434` — because
+containerizing it would mean setting up Windows Docker Desktop's GPU passthrough (WSL2 + the
+NVIDIA Container Toolkit) on top of already-fragile GPU-residency tuning this project needed to
+verify live even natively (`docs/DECISIONS.md` §3, §7). See `docs/SETUP.md` for the equivalent
+native, one-terminal-per-process flow.
 
 ---
 

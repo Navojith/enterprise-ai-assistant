@@ -1,5 +1,11 @@
-# Postgres only — the backend, MCP server and Streamlit frontend run natively against it.
-# Full containerization was a bonus item, deliberately not selected; see docs/DECISIONS.md §7.
+# Full application stack — Postgres, backend, MCP server, and Streamlit frontend — except
+# Ollama, which deliberately stays native on the host. See docs/DECISIONS.md §7 and
+# docs/ASSUMPTIONS_AND_TRADEOFFS.md trade-off 23 for why: this project's GPU-residency tuning
+# (num_gpu: 99, forced in backend/app/llm/ollama_provider.py to fit qwen3:4b entirely in a 4GB
+# laptop GPU) was already fragile enough to need live measurement natively, and Windows Docker
+# Desktop GPU passthrough (WSL2 + NVIDIA Container Toolkit) is real, undemonstrated risk this
+# project has never needed before. `ollama serve` + `ollama pull qwen3:4b` must still be running
+# on the host before `docker compose up` — see docs/SETUP.md.
 #
 # Reads DB_* from .env (Compose loads that file automatically from the project directory), so
 # the container's credentials and the app's own DB_HOST/PORT/NAME/USER/PASSWORD settings
@@ -27,6 +33,77 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: enterprise-ai-assistant-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Overrides only what must differ *inside* the compose network — .env's own values (used
+      # by anyone still running natively) are untouched, since `environment:` wins over
+      # `env_file:` for the same key.
+      DB_HOST: postgres
+      # The container-internal Postgres port, not the host-published 5433 (that mapping exists
+      # only to dodge a native Postgres service shadowing localhost:5432 on the *host* — see the
+      # postgres service's own comment above; it doesn't apply to compose-network traffic).
+      DB_PORT: "5432"
+      # Resolves the backend's own `mcp_server_url` (client side) to the mcp_server service's
+      # compose DNS name. The mcp_server container below sets the *same* variable name to a
+      # different value for its own (server-bind) role — no code change needed, since which
+      # role applies is purely a function of which container's environment sets it.
+      MCP_SERVER_HOST: mcp_server
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      # No-op on Windows/Mac Docker Desktop (which already resolves host.docker.internal), but
+      # keeps this file portable to Linux Docker Engine, where that mapping doesn't exist.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/live')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  mcp_server:
+    build:
+      context: .
+      dockerfile: mcp_server/Dockerfile
+    container_name: enterprise-ai-assistant-mcp-server
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Bind all interfaces inside its own container — see the backend service's comment above
+      # for why this is the same setting name serving a different role here.
+      MCP_SERVER_HOST: 0.0.0.0
+    ports:
+      - "8100:8100"
+    # No healthcheck: the server speaks Streamable HTTP, not a simple GET-able liveness path,
+    # and the backend already degrades gracefully when it's unreachable (main.py's
+    # `mcp_client = None` fallback) — a healthcheck that could false-negative on protocol
+    # semantics it wasn't built to answer isn't worth it here.
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: enterprise-ai-assistant-frontend
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      backend:
+        condition: service_healthy
 
 volumes:
   postgres_data:
