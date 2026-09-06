@@ -434,10 +434,9 @@ since the test environment has no `PINECONE_API_KEY`.
       tracing did not reach graph-node LLM calls at all) rather than assuming the naive
       implementation worked — see `docs/DECISIONS.md` §11 and trade-off 21
 - [x] `README.md` finalised — status line updated to reflect all 8 cycles built and verified
-- [ ] Architecture diagram — `README.md` and `docs/ARCHITECTURE.md` already carry Mermaid
-      diagrams that render natively on GitHub; whether that satisfies ASSESSMENT.md's separate
-      "Architecture diagram" deliverable line or a standalone exported image is still wanted is
-      an open question for the user, not decided here (see the deliverables checklist below)
+- [x] Architecture diagram — confirmed with the user: the Mermaid diagrams already in
+      `README.md` and `docs/ARCHITECTURE.md`, which render natively on GitHub, satisfy this
+      deliverable. No separate exported image is needed.
 - [x] `docs/ASSUMPTIONS_AND_TRADEOFFS.md` completed — trade-off 21 added for this cycle's own
       live-verification findings
 - [x] Model selection rationale — already thorough (`docs/DECISIONS.md` §2, §3, §5); memory
@@ -461,7 +460,7 @@ since the test environment has no `PINECONE_API_KEY`.
 From `ASSESSMENT.md`. Tracked separately because these are graded independently of the code.
 
 - [ ] Public source repository
-- [ ] Architecture diagram
+- [x] Architecture diagram — Mermaid in `README.md`/`docs/ARCHITECTURE.md`, confirmed sufficient with the user
 - [ ] Demo video (45 min), public URL
 - [ ] LangSmith traces shown in the demo — **record within 14 days** of the traced run (free-tier retention)
 - [ ] Assumptions and trade-offs presented in the demo
