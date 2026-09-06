@@ -515,9 +515,28 @@ Newest first. One line per meaningful change.
   bottleneck (`rlm_max_total_sub_agent_calls`'s default of 4 now under-covers a broad question
   once batching correctly respects document boundaries, so a research turn can report an honest
   "no recurring root cause identified" over only a handful of the corpus's real 10–15 payment
-  incidents rather than a comprehensive answer) — left as an open, documented trade-off
-  (`docs/ASSUMPTIONS_AND_TRADEOFFS.md`'s "Known limitations") rather than resolved unilaterally,
-  since raising it trades coverage against more sequential local-model calls per turn.
+  incidents rather than a comprehensive answer) — surfaced as an explicit question rather than
+  resolved unilaterally; the user chose to raise the budget. Raised
+  `rlm_max_total_sub_agent_calls` 4 -> 8 and, to match, `rlm_plan_timeout_seconds` 450s -> 750s
+  (both sized off live-measured 55-90s-per-call figures, `docs/DECISIONS.md` §9), and fixed a
+  third, related staleness bug the same pass turned up: `frontend/api_client.py`'s own
+  `stream_chat_turn` client-side timeout still defaulted to 240s — already below the backend's
+  *previous* 450s budget, let alone the new 750s one — a client-side truncation risk with the
+  same shape as this session's own `curl -m 500` cutting off its second verification run
+  mid-turn; raised to 900s. Re-verified live end to end after rebuilding and restarting the
+  backend and frontend containers: the identical Analyst question now returns a real, correctly
+  cited, verifiably accurate answer — "Third-party fraud-check API outage (2025-09-25,
+  2025-12-10)" and "Card-network gateway timeout (2025-10-23, 2026-08-01)" — dates that
+  independently match the Viewer's own `"retrieval"`-route answer to the same question earlier
+  in the same investigation, strong evidence the fix produces *correct* findings, not merely
+  differently-shaped ones. That run only used 2 of the now-available 8 sub-agent calls (the
+  model's own generated plan chose a smaller `top_k=10` this time, one more instance of the
+  already-documented "answer quality is model-bound" variance across identical questions — see
+  `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 1), so it did not surface all 5 root-cause
+  categories in this run; the raised budget's coverage benefit applies when the model's plan
+  requests a wider candidate set, as seen on the two earlier verification runs (`top_k=100`
+  both times). 10 new/updated tests total across both passes (368, up from 360); `ruff`,
+  `ruff format`, `mypy --strict` all pass clean.
 - **2026-09-06** — Fixed five separate, sequentially-discovered RLM reliability and correctness
   bugs, starting from a user report that an Analyst got "Research could not be completed:
   Sandbox execution exceeded its 180.0s wall-clock budget" asking the spec's own example

@@ -188,7 +188,15 @@ class Settings(BaseSettings):
     # (a validated plan-generation failure, a fallback plan's own search, and 4 real sequential
     # sub-agent analyses each running full reasoning), and needs headroom above that, not exactly
     # up to it.
-    rlm_plan_timeout_seconds: float = Field(default=450.0, gt=0)
+    # Raised a third time, 450s -> 750s, alongside `rlm_max_total_sub_agent_calls` below
+    # (docs/ASSUMPTIONS_AND_TRADEOFFS.md trade-off 28): once `rlm/api.py::group_by_document`
+    # made batching correctly respect document boundaries, covering a broad question's real
+    # evidence needs more sequential sub-agent calls than 4 comfortably fits inside 450s — live
+    # verification measured individual reasoning-enabled sub-agent/aggregate calls at 55-90s each
+    # on this hardware. 750s gives 8 sequential sub-agent calls plus plan generation, search, and
+    # aggregation genuine headroom rather than cutting a real run off mid-way, the same reasoning
+    # as the 180s -> 450s raise above, just for a larger budget.
+    rlm_plan_timeout_seconds: float = Field(default=750.0, gt=0)
     # How many levels of *plan generation* `sub_agent` may recurse through before bottoming out
     # to one direct, non-recursive LLM analysis — see `rlm/api.py`'s module docstring. Defaults
     # to 1 (a top-level plan's `sub_agent` calls always bottom out to a single leaf analysis,
@@ -215,7 +223,19 @@ class Settings(BaseSettings):
     # `rlm.api.RLMBudget` — bounds *width*, which `rlm_max_depth` alone does not, keeping a
     # research turn's total LLM calls inside docs/DECISIONS.md §3's per-question latency budget
     # regardless of how the generated plan's tree happens to be shaped.
-    rlm_max_total_sub_agent_calls: int = Field(default=4, ge=1)
+    #
+    # Raised 4 -> 8 (docs/ASSUMPTIONS_AND_TRADEOFFS.md trade-off 28): 4 was tuned against a
+    # fixed-size `batch()` that (before that trade-off's fix) happened to spread thin across many
+    # incidents inaccurately — one incident's sections split across different batches. Once
+    # `rlm/api.py::group_by_document` made batching correctly respect document boundaries, 4
+    # calls covers only a handful of whole documents, well under the seed corpus's real ~10-15
+    # payment incidents for the spec's own example question — live-verified producing an honest
+    # but thin "no recurring root cause identified" over a handful of documents instead of a
+    # comprehensive answer. 8 comfortably covers that corpus's real incident count at
+    # `group_by_document`'s default `max_batch_size=8` (roughly 2 incidents per batch), at the
+    # cost of up to twice as many sequential local-model calls per research turn — paid for by
+    # `rlm_plan_timeout_seconds`'s matching raise above.
+    rlm_max_total_sub_agent_calls: int = Field(default=8, ge=1)
 
     @field_validator("rerank_monthly_budget")
     @classmethod

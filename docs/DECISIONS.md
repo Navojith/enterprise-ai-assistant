@@ -288,6 +288,22 @@ failure shape as the paragraph above, just triggered by request latency instead 
 fan-out. Full investigation, including two further correctness bugs the same session found once
 the turn could complete at all, in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 27.
 
+A third session raised `rlm_max_total_sub_agent_calls` 4 -> 8 and `rlm_plan_timeout_seconds`
+450s -> 750s together, after a real quality gap surfaced by comparing the "research" route's
+answer against the plain "retrieval" route's answer to the identical question
+(`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28): once that same session's `group_by_document`
+fix made batching correctly respect document boundaries, 4 sub-agent calls covers only a
+handful of whole documents — well under the seed corpus's real ~10-15 payment incidents for the
+spec's own example question — where the previous fixed-size `batch()` had (inaccurately) spread
+thinner across more of them. Raising the call count without also raising the wall-clock budget
+would have just traded one failure for another (the same shape as the two raises above: more
+sequential reasoning-enabled calls need more total time, not just more per-call headroom), so
+both moved together, sized off live-measured 55-90s-per-call figures. `frontend/api_client.py`'s
+own client-side `stream_chat_turn` timeout was found in the same pass to have already drifted
+stale below the backend's *previous* 450s budget (still defaulting to an old 240s), a client-side
+truncation risk with the identical shape as a circuit-breaker trip above; raised to 900s and its
+rationale comment corrected to cite the current backend figure instead of a two-raises-old one.
+
 ---
 
 ## 10. Prompt-injection detection: heuristics first, classifier only when ambiguous

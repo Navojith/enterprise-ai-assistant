@@ -1127,6 +1127,24 @@ worth recording precisely because a less careful pass would have missed them:
   "Known limitations" section below records it as unresolved rather than implying the fix above
   made the research route reliably comprehensive.
 
+**Addendum, same session: the user chose to raise the budget.** `rlm_max_total_sub_agent_calls`
+4 -> 8, `rlm_plan_timeout_seconds` 450s -> 750s to match (both in `docs/DECISIONS.md` §9), plus a
+related fix the same pass turned up: `frontend/api_client.py`'s `stream_chat_turn` client-side
+timeout had already drifted stale at 240s — below even the *previous* 450s backend budget — a
+client-side truncation risk with the identical shape as this session's own `curl -m 500` cutting
+its second verification run off mid-turn with no server-side error at all; raised to 900s.
+Re-verified live end to end after rebuilding both containers: the identical Analyst question
+returned a real, correctly cited answer — "Third-party fraud-check API outage (2025-09-25,
+2025-12-10)" and "Card-network gateway timeout (2025-10-23, 2026-08-01)" — and those dates
+independently match the Viewer's own `"retrieval"`-route answer to the same question from
+earlier in this same investigation, real evidence the fix produces *correct* findings rather than
+merely differently-vague ones. That run used only 2 of the now-available 8 sub-agent calls,
+because the model's own generated plan chose `top_k=10` this time rather than the `top_k=100`
+seen on the two earlier verification runs — the raised budget provides real headroom for a wide
+plan, but cannot make a narrow one wider; see the "Known limitations" bullet below for that
+distinction. 10 new/updated tests total across both passes (368, up from 360); `ruff`,
+`ruff format`, `mypy --strict` all pass clean.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see
@@ -1150,10 +1168,12 @@ worth recording precisely because a less careful pass would have missed them:
 - **Single region.** Pinecone Starter is limited to AWS `us-east-1`.
 - **Docker Compose deployment only: intermittent `host.docker.internal` stalls to native
   Ollama.** See trade-off 24. Not present on the native run path.
-- **The `"research"` route can under-cover a broad question's real evidence set.** See
-  trade-off 28: `Settings.rlm_max_total_sub_agent_calls` (default 4) caps how many documents a
-  research turn can actually analyze once batching correctly respects document boundaries, which
-  can be fewer than the corpus's real number of relevant documents for a "summarize everything"
-  question — the turn then reports the honest, unfabricated conclusion ("no recurring root cause
-  identified in what was reviewed") rather than a comprehensive one. Open decision, not resolved:
-  raising the budget buys coverage at the cost of more sequential local-model calls per turn.
+- **The `"research"` route's coverage of a broad question still varies with the model's own
+  generated plan, not just the sub-agent budget.** Trade-off 28's addendum: raising
+  `rlm_max_total_sub_agent_calls` 4 -> 8 gives real headroom when the model's plan requests a
+  wide candidate set (`top_k=100`, seen on two live runs), but a plan that instead chooses a
+  small `top_k` (10, seen on a third live run) simply never generates enough batches to use that
+  headroom — the raised budget cannot compensate for a narrow *search*. This is the same
+  model-bound variance trade-off 1 already names, applied to plan generation specifically: a 4B
+  model's own choices (query text, `top_k`, which functions to call) differ run to run for an
+  identical question, and no amount of downstream budget raises that.

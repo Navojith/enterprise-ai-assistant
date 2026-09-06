@@ -163,7 +163,7 @@ def stream_chat_turn(
     *,
     thread_id: str,
     message: str,
-    timeout_seconds: float = 240.0,
+    timeout_seconds: float = 900.0,
 ) -> Iterator[ChatStreamEvent]:
     """Open the SSE chat stream and yield typed events as they arrive.
 
@@ -171,8 +171,14 @@ def stream_chat_turn(
     body) updates the Agent Activity Panel and the answer text as each event lands, matching
     ASSESSMENT.md's "display in real time" requirement, rather than blocking until the turn
     finishes and rendering everything at once. `timeout_seconds` defaults well above
-    `Settings.rlm_plan_timeout_seconds` (180s, `docs/DECISIONS.md` §9) since a research-routed
-    turn is the slowest path this client will ever wait on.
+    `Settings.rlm_plan_timeout_seconds` (750s, `docs/DECISIONS.md` §9,
+    `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 28) since a research-routed turn is the
+    slowest path this client will ever wait on, plus headroom for the guardrail/supervisor/
+    response/validator nodes around it. This default had drifted stale at 240s against the
+    backend's own 450s budget even before that trade-off's raise — a client-side timeout this
+    much lower than the server's own would silently truncate exactly the slow, real answers the
+    research route exists to produce, the same failure mode this project's own live testing hit
+    directly with a bare `curl -m 500` against a run that legitimately needed longer.
     """
     try:
         with httpx.stream(
