@@ -8,6 +8,14 @@ vulnerable to an unresolved follow-up reference as a single-hop retrieval turn i
 about last month?" names no topic on its own, and the generated search plan can only decompose
 a question it can actually read.
 
+Also passes `state["search_department"]` through to `execute_research` — the RLM path was
+found live to suffer the identical cross-department RRF-dilution problem trade-off 26 already
+fixed for `agents/nodes/retrieval.py`, because `rlm/api.py::build_search`'s `search()`
+primitive ran a plain, unscoped all-department search with no department priority at all. Every
+`RLMContext` this turn creates, including recursive ones, now carries the same department guess
+so a generated plan's `search()` calls benefit from the identical merge-not-replace fix
+(`retrieval/hybrid.py::merge_prioritizing_scoped`), not just the single-hop retrieval path.
+
 Delegates everything else to `rlm/executor.py::execute_research`: generating a Python search
 plan, validating and running it in `rlm/sandbox.py`, fanning out to recursive sub-agents under
 a bounded semaphore, and aggregating. This node's own job is small and mirrors
@@ -92,6 +100,7 @@ async def research_node(state: AgentState, runtime: Runtime[GraphContext]) -> di
             store=runtime.context.pinecone_store,
             llm=runtime.context.llm,
             settings=settings,
+            department=state.get("search_department"),
         )
     except AppError as exc:
         logger.warning("research_node_degraded", error=str(exc))

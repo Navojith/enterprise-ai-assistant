@@ -956,19 +956,115 @@ regression from the larger merged result set. 1 new test file
 cap, and — explicitly — the wrong-guess safety-net property), 7 new tests (355 total, up from
 348); `ruff`, `ruff format`, `mypy --strict` all pass clean.
 
+### 27. A user-reported "Research could not be completed" timeout unpeeled into four separate,
+sequentially-discovered RLM bugs — a timeout, an invisible generated-code failure mode, a
+retrieval-quality gap, and a reporting bug — each only visible once the one before it was fixed
+
+The user hit this live, as an Analyst, asking the spec's own example question: *"Summarize all
+outage reports related to payment failures during the last year and identify recurring root
+causes."* The answer: *"Research could not be completed: Sandbox execution exceeded its 180.0s
+wall-clock budget."* First question asked back: is this costly? No — every call in the failed
+run was local Ollama inference (free) and Pinecone free-tier search; the 180s figure is a
+wall-clock safety timeout, not a spending cap. But it also wasn't a fluke: root-caused via
+backend logs to `rlm/api.py`'s sub-agent/aggregate calls running with `reasoning=True` (so the
+panel can show their thinking), which routinely need more than 30s each on this hardware — one
+isolated test found a *trivial* "say hello in 3 words" request take 12.7s and 693 tokens of
+chain-of-thought even with `think:false` set. Three consecutive per-call timeouts at the old 30s
+tripped `llm/chain.py`'s circuit breaker (`llm_circuit_breaker_failure_threshold=3`), failing the
+*entire* turn, including the unrelated Response node — the identical failure shape
+trade-off 17 already documented for concurrent fan-out, just triggered by request latency
+instead. Fixed by raising `llm_request_timeout_seconds` 30s→90s, the breaker threshold 3→5, and
+`rlm_plan_timeout_seconds` 180s→450s (`docs/DECISIONS.md` §9) — all now the actual code defaults,
+not local-only overrides.
+
+Re-testing after that fix did not produce the correct answer either, which is the real story of
+this trade-off: each fix bought enough reliability to reach the *next*, previously-unreachable
+bug, not a working system. **Bug 2**: the turn completed in 110s with `used_fallback_plan=false`
+(the model's *own* generated plan had validated and run with no exception) but
+`sub_agent_calls_made=0` and a confidently wrong "no incidents identified" answer — despite the
+corpus genuinely having 7 payment-failure incidents. Nothing anywhere logged what the generated
+code actually was, because `rlm/planner.py` only ever logged *failures*; a plan that "succeeded"
+by passing AST validation and running to completion was invisible even when it was functionally
+hollow. Fixed by adding `rlm_generated_plan_used`/`rlm_fallback_plan_used`/
+`rlm_plan_generation_call_failed` logging (with the full code) to every path `generate_plan` can
+return through — `validate_ast` checks *what constructs* a plan uses, never *whether it does
+anything sensible*, so this was always a real gap, just never visible.
+
+**Bug 3**, found immediately once bug 2's logging existed: the next run's generated plan called
+`filter(search(...), document_type="outage report")` — a value that matches no real chunk (the
+corpus's real values are `incident`/`runbook`/`architecture`/`product_spec`/`policy`/
+`meeting_notes`) — silently zeroing a search that had, per the same log line, correctly found
+real evidence. A second, independent bug sat underneath it: that same search — inside the RLM
+sandbox specifically — was a plain, unscoped, all-6-department `hybrid_search` call with no
+department-priority merge at all, meaning `rlm/api.py::build_search` had never received
+trade-off 26's fix, only `agents/nodes/retrieval.py` had. Both were fixed together: extracted
+`_merge_prioritizing_scoped` out of `agents/nodes/retrieval.py` into a shared
+`retrieval/hybrid.py::merge_prioritizing_scoped` (so the two call sites can never drift apart
+again), threaded the Supervisor's `search_department` guess through `RLMContext`/
+`execute_research`/`research_node` and every recursive sub-agent context, and told the model the
+real `document_type`/`department` values explicitly in `rlm/planner.py`'s system prompt while
+also making `filter_chunks` ignore an unrecognized value defensively (log + treat as no filter)
+instead of matching nothing — belt-and-suspenders, since a prompt fix alone doesn't stop a model
+from inventing a new wrong value later. Verified the retrieval half directly, outside the running
+app, before trusting a log line: a standalone script calling `hybrid_search` with the exact live
+query and `department="payments"` returned real payment-incident chunks on both the scoped and
+unscoped side.
+
+**Bug 4**, found on the very next live run after bugs 2–3's fixes: the generated plan now used
+real values (`document_type="incident"`, `department="payments"`) and its search correctly found
+real evidence (confirmed via the new `rlm_search_completed` log — `scoped_count=36`) — but still
+failed at runtime, this time on `batch(filter(...))` with a `TypeError: batch_chunks() missing 1
+required positional argument: 'size'`. This is a distinct, recurring habit (the model forgetting
+`batch()`'s required second argument), seen on two separate runs, and is **not fixed** — recorded
+here rather than silently worked around, since the deterministic fallback plan's existence is
+exactly what already covers it: the turn fell back as designed, and the fallback's own `search()`
+(confirmed via the same log line: `scoped_count=20`, all real) fed 4 real sequential sub-agent
+analyses over real evidence, aggregating to a correct, cited, validated answer identifying four
+real recurring root causes across 5 incidents (database connection pool exhaustion, card-network
+gateway timeout, idempotency-key race condition, expired TLS certificate). A cheap, analogous
+follow-up fix (giving `batch_chunks` a sensible default `size`, the same defensive shape as
+bug 3's `filter_chunks` fix) is a natural next step if this recurs, not applied here since it
+was not asked for and the fallback already covers it.
+
+**Bug 5**, the one remaining issue even in that correct run: the Activity Panel still reported
+"Research complete (0 sub-agent call(s))" despite 4 real ones having just run — a **pre-existing
+Cycle 5 bug**, not introduced by anything above, that had simply never had the chance to surface
+before. `rlm/executor.py::_run_plan_at_depth`'s depth-0 runtime-failure fallback deliberately
+swaps in a *fresh* `RLMBudget` (trade-off 17, so a failed attempt can't starve the fallback's own
+budget) — but `execute_research` read `sub_agent_calls_made` from the *original* budget object it
+had constructed before the swap, which the fallback's real work never touched. This only shows up
+when a top-level plan fails at *runtime* (not validation) at depth 0 *and* the resulting fallback
+completes real sub-agent calls — a combination no previous live-verified run had ever hit
+together, since earlier runs either used the fallback from a validation failure (no swap needed —
+that path returns before `_run_plan_at_depth`'s own fallback branch) or had their fallback's
+sub-agent calls fail outright (a legitimately-zero count). Fixed by having `_run_plan_at_depth`
+return `(result, used_fallback, budget)` — the actual budget object whichever attempt used — so
+`execute_research` can never read a stale one.
+
+Final re-verification, live, of the exact original question: 352s end to end, `"Research complete
+(4 sub-agent call(s))"` reported correctly, a real, cited, validated answer. Five distinct bugs,
+each only discoverable once the one before it stopped masking it — the honest shape of live
+verification this project has followed throughout, not a tidier story rewritten after the fact.
+5 new tests (360 total, up from 355): two for the department-scoped search merge and two for
+`filter_chunks`'s defensive value handling (`tests/rlm/test_api.py`), one pinning bug 5's exact
+regression (`tests/rlm/test_executor.py`); `ruff`, `ruff format`, `mypy --strict` all pass clean.
+
 ## Known limitations
 
 - **Latency.** Expect 60–90 seconds per question, now measured plausible rather than assumed — see
   trade-off 13. Still dominated by local inference on a 4 GB GPU, not by the architecture. The
   `"tools"` route (Cycle 4) costs two more sequential LLM calls than `"retrieval"` or `"direct"`
   (choose a tool, then fill its arguments, on top of the Supervisor and Response calls every
-  route already pays) — verified live: one run hit `LLM_REQUEST_TIMEOUT_SECONDS`'s 30s default
-  on the argument-filling call and degraded cleanly to a typed `error` event on the stream
-  (`api/v1/chat.py`'s existing LLM-failure handling, unchanged by this cycle); an immediate retry
-  of the identical question completed in ~20s end to end. Treated as expected variance on this
-  hardware, not a bug — `docs/DECISIONS.md` §3 already prices in 8–15 calls per question. The
-  `"research"` route (Cycle 5) costs more still — 90–150s measured live, see trade-off 17 — since
-  its sub-agent analyses run sequentially against the one local model rather than concurrently.
+  route already pays) — verified live: one run hit `LLM_REQUEST_TIMEOUT_SECONDS`'s then-default
+  of 30s (raised to 90s since — trade-off 27) on the argument-filling call and degraded cleanly
+  to a typed `error` event on the stream (`api/v1/chat.py`'s existing LLM-failure handling,
+  unchanged by this cycle); an immediate retry of the identical question completed in ~20s end to
+  end. Treated as expected variance on this hardware, not a bug — `docs/DECISIONS.md` §3 already
+  prices in 8–15 calls per question. The `"research"` route (Cycle 5) costs considerably more —
+  originally measured at 90–150s (trade-off 17), then remeasured at up to ~350s once individual
+  calls were given enough per-call headroom to actually succeed instead of timing out at the old
+  30s (trade-off 27) — since its sub-agent and aggregate calls run with `reasoning=True` and
+  sequentially against the one local model, both by design (trade-off 17, trade-off 27).
 - **Answer quality is model-bound**, not design-bound. See trade-off 1.
 - **Synthetic corpus** means retrieval quality is not validated against real enterprise documents.
 - **No evaluation harness.** There is no automated answer-quality benchmark; correctness is verified

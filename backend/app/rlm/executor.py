@@ -79,8 +79,12 @@ def _stringify(result: Any) -> str:
 
 async def _run_plan_at_depth(
     *, question: str, data: Any, context: RLMContext, timeout_seconds: float
-) -> tuple[Any, bool]:
-    """Generate and run one plan at `context.depth`. Returns `(sandbox_result, used_fallback)`.
+) -> tuple[Any, bool, RLMBudget]:
+    """Generate and run one plan at `context.depth`. Returns `(sandbox_result, used_fallback,
+    budget)` — `budget` is whichever `RLMBudget` the plan that actually produced the result ran
+    against, which the caller must use for reporting, not whatever budget object it already had
+    lying around (see the fresh-budget paragraph below for why those can differ).
+
     A generated plan that validates but still fails at runtime (a `NameError` from a typo, for
     instance — `rlm/sandbox.py` wraps that as `SandboxViolationError` too) gets exactly one
     fallback attempt with the fixed deterministic plan; the fallback plan itself is never
@@ -96,6 +100,15 @@ async def _run_plan_at_depth(
     nested call (`context.depth > 0`) keeps the shared budget instead: it must stay a true
     whole-tree cap there, since resetting it for one branch's fallback would let the tree's
     total sub-agent calls exceed the cap the rest of the tree is still counting against.
+
+    This fresh-budget swap is exactly why this function must hand its caller the budget it
+    actually used, not leave the caller to reuse its own: `execute_research` used to report
+    `sub_agent_calls_made` from the budget object it constructed *before* calling this function,
+    which is a different object from `fallback_context.budget` once this swap happens — live
+    verification found a real research turn that ran four genuine sub-agent analyses (visible as
+    four `TOOL_CALL` activity events) still get reported to the Agent Activity Panel as "Research
+    complete (0 sub-agent call(s))", because the count was read from the wrong, never-incremented
+    budget. Returning the effective budget by value removes the chance of that mismatch.
     """
     code, used_fallback = await generate_plan(question, llm=context.llm)
     sandbox_globals = build_rlm_globals(context)
@@ -129,16 +142,16 @@ async def _run_plan_at_depth(
             },
             timeout_seconds=timeout_seconds,
         )
-        used_fallback = True
+        return outcome.result, True, fallback_context.budget
 
-    return outcome.result, used_fallback
+    return outcome.result, used_fallback, context.budget
 
 
 async def run_research(*, question: str, data: Any, context: RLMContext) -> str:
     """The `NestedPlanRunner` bound into every `RLMContext.run_nested_plan` (see `rlm/api.py`).
     Runs one full nested plan-generation-and-execution cycle at `context.depth` and returns a
     plain finding string."""
-    result, _ = await _run_plan_at_depth(
+    result, _, _ = await _run_plan_at_depth(
         question=question, data=data, context=context, timeout_seconds=_NESTED_PLAN_TIMEOUT_SECONDS
     )
     return _stringify(result)
@@ -152,6 +165,7 @@ async def execute_research(
     store: PineconeStore | None,
     llm: LLMProvider,
     settings: Settings,
+    department: str | None = None,
 ) -> ResearchResult:
     """Entry point for `agents/nodes/research.py`: depth 0 of the recursive tree.
 
@@ -160,6 +174,13 @@ async def execute_research(
     captures the current `contextvars.Context` for `rlm/api.py`'s sync/async bridge to reuse on
     every recursive call, so the panel and (from Cycle 7) LangSmith both see sub-agent activity
     nested under this turn instead of detached from it.
+
+    `department` is the Supervisor's same-turn department guess (`state["search_department"]`,
+    `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26) — threaded into `RLMContext` so every
+    `search` call the generated (or fallback) plan makes, at any recursion depth, prioritizes
+    that department without excluding the rest. `None` when the Supervisor could not identify
+    one, which is also this parameter's default: existing callers that predate this fix keep
+    getting the old, plain all-department search unchanged.
     """
     loop = asyncio.get_running_loop()
     captured_vars = contextvars.copy_context()
@@ -181,9 +202,10 @@ async def execute_research(
         max_concurrent_sub_agents=settings.rlm_max_concurrent_sub_agents,
         run_nested_plan=run_research,
         activity_writer=writer,
+        department=department,
     )
 
-    result, used_fallback = await _run_plan_at_depth(
+    result, used_fallback, effective_budget = await _run_plan_at_depth(
         question=question,
         data=None,
         context=context,
@@ -192,5 +214,5 @@ async def execute_research(
     return ResearchResult(
         result=result,
         used_fallback_plan=used_fallback,
-        sub_agent_calls_made=budget.sub_agent_calls_made,
+        sub_agent_calls_made=effective_budget.sub_agent_calls_made,
     )

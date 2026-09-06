@@ -20,8 +20,11 @@ than the document actually under discussion. `_latest_user_text` remains as the 
 behavior rather than raising if it is ever reached without the Supervisor having run first.
 
 `state["search_department"]`, when the Supervisor could identify one, *prioritizes* that
-department rather than replacing the search with it (`_merge_prioritizing_scoped` below) — a
-department-scoped search runs alongside the existing all-department one, never instead of it.
+department rather than replacing the search with it
+(`retrieval/hybrid.py::merge_prioritizing_scoped`) — a department-scoped search runs alongside
+the existing all-department one, never instead of it. The RLM path (`rlm/api.py::build_search`)
+applies the identical fix for the identical reason; the merge function itself lives in
+`retrieval/hybrid.py` so the two call sites can never drift apart.
 An earlier version of this fix passed the guessed department straight through to
 `hybrid_search`'s `namespaces` parameter, excluding every other department outright. Verified
 live that this was a real regression, not just an incomplete fix: a 4B model's department guess
@@ -49,8 +52,7 @@ from backend.app.agents.context import GraphContext
 from backend.app.agents.state import AgentState
 from backend.app.core.errors import VectorStoreUnavailableError
 from backend.app.observability.events import ActivityEvent, ActivityEventType
-from backend.app.retrieval.hybrid import hybrid_search
-from backend.app.retrieval.models import RetrievedChunk
+from backend.app.retrieval.hybrid import hybrid_search, merge_prioritizing_scoped
 from backend.app.retrieval.reranker import rerank_chunks
 
 logger = structlog.get_logger(__name__)
@@ -79,23 +81,6 @@ def _latest_user_text(messages: list[AnyMessage]) -> str:
         if isinstance(message, HumanMessage):
             return str(message.content)
     raise ValueError("Retrieval node reached with no user message in state.")
-
-
-def _merge_prioritizing_scoped(
-    scoped: list[RetrievedChunk], unscoped: list[RetrievedChunk], *, top_k: int
-) -> list[RetrievedChunk]:
-    """Combine a department-scoped search with the existing all-department search, keeping
-    every scoped hit — it already survived competing only against its own department, so it is
-    never crowded out by another department's unrelated top-ranked chunk — and filling any
-    remaining slots from the unscoped list, deduped by `chunk_id`, preserving each list's own
-    order. `scoped` is empty when no department was identified, in which case this is a no-op
-    that returns `unscoped` unchanged (aside from the redundant but harmless re-truncation)."""
-    merged: dict[str, RetrievedChunk] = {chunk.chunk_id: chunk for chunk in scoped}
-    for chunk in unscoped:
-        if len(merged) >= top_k:
-            break
-        merged.setdefault(chunk.chunk_id, chunk)
-    return list(merged.values())[:top_k]
 
 
 async def retrieval_node(state: AgentState, runtime: Runtime[GraphContext]) -> dict[str, Any]:
@@ -153,7 +138,7 @@ async def retrieval_node(state: AgentState, runtime: Runtime[GraphContext]) -> d
                 raise unscoped_result
             scoped = [] if isinstance(scoped_result, BaseException) else scoped_result
             unscoped = [] if isinstance(unscoped_result, BaseException) else unscoped_result
-            fused = _merge_prioritizing_scoped(scoped, unscoped, top_k=_MERGED_TOP_K)
+            fused = merge_prioritizing_scoped(scoped, unscoped, top_k=_MERGED_TOP_K)
         else:
             fused = await hybrid_search(store, query_text=query, role=role, top_k=_TOP_K)
         chunks = await rerank_chunks(store, query=query, chunks=fused, settings=settings)

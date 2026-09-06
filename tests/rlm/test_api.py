@@ -93,6 +93,7 @@ def _context(
     max_concurrent_sub_agents: int = 4,
     depth: int = 0,
     run_nested_plan: Any = None,
+    department: str | None = None,
 ) -> RLMContext:
     async def _default_nested(*, question: str, data: Any, context: RLMContext) -> str:
         raise NotImplementedError("this test does not expect nested-plan recursion")
@@ -108,6 +109,7 @@ def _context(
         depth=depth,
         max_concurrent_sub_agents=max_concurrent_sub_agents,
         run_nested_plan=run_nested_plan or _default_nested,
+        department=department,
     )
 
 
@@ -162,6 +164,27 @@ class TestFilterChunks:
             [c.model_dump(mode="json") for c in chunks],
             document_type="incident",
             department="payments",
+        )
+
+        assert [c["chunk_id"] for c in result] == ["a"]
+
+    def test_an_unrecognized_document_type_is_ignored_rather_than_matching_nothing(self) -> None:
+        """The exact live-verified failure: a generated plan filtered on `document_type="outage
+        report"` — not a real value — and got an empty result with no error anywhere to explain
+        why. An invented value must degrade to "no filter", never to "everything excluded"."""
+        chunks = [_chunk(chunk_id="a", document_type="incident")]
+
+        result = filter_chunks(
+            [c.model_dump(mode="json") for c in chunks], document_type="outage report"
+        )
+
+        assert [c["chunk_id"] for c in result] == ["a"]
+
+    def test_an_unrecognized_department_is_ignored_rather_than_matching_nothing(self) -> None:
+        chunks = [_chunk(chunk_id="a", department="payments")]
+
+        result = filter_chunks(
+            [c.model_dump(mode="json") for c in chunks], department="not-a-real-department"
         )
 
         assert [c["chunk_id"] for c in result] == ["a"]
@@ -242,6 +265,66 @@ class TestSyncAsyncBridge:
         result = await asyncio.get_running_loop().run_in_executor(None, search, "q")
 
         assert result == []
+
+    async def test_search_with_a_department_merges_a_scoped_and_unscoped_search(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26: a plain all-department search lets
+        RRF fusion bury the right department's chunks under irrelevant ones. With a department
+        set, `search` must run *both* a scoped and an all-department search and keep every
+        scoped hit, exactly like `agents/nodes/retrieval.py`'s own merge."""
+        scoped_chunk = _chunk("scoped::hit")
+        unscoped_chunk = _chunk("unscoped::hit", department="security")
+        calls: list[dict[str, Any]] = []
+
+        async def _fake_hybrid_search(
+            store: object,
+            *,
+            query_text: str,
+            role: str,
+            top_k: int,
+            namespaces: list[str] | None = None,
+        ) -> list[RetrievedChunk]:
+            calls.append({"namespaces": namespaces, "top_k": top_k})
+            return [scoped_chunk] if namespaces else [unscoped_chunk]
+
+        monkeypatch.setattr(api, "hybrid_search", _fake_hybrid_search)
+        context = _context(department="payments")
+
+        outcome = await run_sandboxed(
+            "result = search('payment outages', top_k=5)",
+            injected_globals=build_rlm_globals(context),
+            timeout_seconds=2.0,
+        )
+
+        assert {c["chunk_id"] for c in outcome.result} == {"scoped::hit", "unscoped::hit"}
+        scoped_calls = [c for c in calls if c["namespaces"]]
+        assert scoped_calls and all(c["namespaces"] == ["payments"] for c in scoped_calls)
+        assert any(c["namespaces"] is None for c in calls)  # the all-department search too
+
+    async def test_search_without_a_department_never_scopes_by_namespace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No department identified — behavior must stay exactly the pre-fix plain search, one
+        call, no `namespaces` kwarg at all."""
+        calls: list[dict[str, Any]] = []
+
+        async def _fake_hybrid_search(
+            store: object, *, query_text: str, role: str, top_k: int
+        ) -> list[RetrievedChunk]:
+            calls.append({"top_k": top_k})
+            return [_chunk()]
+
+        monkeypatch.setattr(api, "hybrid_search", _fake_hybrid_search)
+        context = _context(department=None)
+
+        await run_sandboxed(
+            "result = search('q', top_k=5)",
+            injected_globals=build_rlm_globals(context),
+            timeout_seconds=2.0,
+        )
+
+        assert len(calls) == 1
 
     async def test_sub_agent_bottoms_out_to_a_leaf_finding_at_max_depth(self) -> None:
         llm = _FakeLLM(

@@ -79,7 +79,8 @@ from backend.app.core.security.rbac import Principal
 from backend.app.guardrails.injection import UNTRUSTED_CONTENT_INSTRUCTION, frame_untrusted_content
 from backend.app.llm.provider import LLMProvider
 from backend.app.observability.events import ActivityEvent, ActivityEventType
-from backend.app.retrieval.hybrid import hybrid_search
+from backend.app.retrieval.hybrid import hybrid_search, merge_prioritizing_scoped
+from backend.app.retrieval.models import DEPARTMENTS, DocumentType
 from backend.app.retrieval.pinecone_store import PineconeStore
 
 logger = structlog.get_logger(__name__)
@@ -157,6 +158,14 @@ class RLMContext:
     max_concurrent_sub_agents: int
     run_nested_plan: NestedPlanRunner
     activity_writer: Callable[[ActivityEvent], None] = field(default=lambda _event: None)
+    # The Supervisor's department guess for this turn (`agents/nodes/supervisor.py`'s
+    # `search_query`/`department` fields, `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26),
+    # threaded through from `rlm/executor.py::execute_research` and preserved across every
+    # recursive `RLMContext` a nested plan creates (`_one_sub_agent_call` below) — a sub-question
+    # a nested plan investigates is still fundamentally about the same department as the turn
+    # that spawned it. `None` when the Supervisor could not identify one, in which case `search`
+    # behaves exactly as it did before this field existed: a plain all-department search.
+    department: str | None = None
 
 
 def _submit_to_loop(
@@ -205,15 +214,64 @@ def build_search(context: RLMContext) -> Callable[..., list[dict[str, Any]]]:
     async def _search(query: str, top_k: int) -> list[dict[str, Any]]:
         if context.store is None:
             return []
+        # Populated only on the department-scoped path below; stay `None` on the plain path so
+        # the completion log can distinguish "not scoped" from "scoped but one side came back
+        # empty" — the RLM path has no per-search activity event the way `retrieval_node` gets
+        # (`RETRIEVAL_STATUS`, "Found N relevant chunk(s)"), so this is currently the only place
+        # a live run's actual chunk counts are ever visible at all.
+        scoped_count: int | None = None
+        unscoped_count: int | None = None
         try:
-            chunks = await hybrid_search(
-                context.store, query_text=query, role=context.role, top_k=top_k
-            )
+            if context.department:
+                # Identical fix, identical reason, as `agents/nodes/retrieval.py`'s scoped +
+                # all-department merge (`docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 26): a
+                # plain all-department `hybrid_search` lets RRF fusion bury the correct
+                # department's chunks under several *other* departments' locally-top-ranked but
+                # irrelevant ones. Both searches keep the caller's own `top_k` rather than each
+                # getting a full `top_k` merged into `top_k * 2` the way the retrieval node
+                # does — `sub_agents`'s batch count (and so `RLMBudget`'s sub-agent-call spend)
+                # is directly driven by how many chunks `search` returns, so doubling it here
+                # would silently double a generated plan's own batching math and its sub-agent
+                # budget consumption, not just its evidence quality. Run concurrently so a
+                # department-scoped search costs one extra round-trip's latency, not a
+                # sequential doubling of it.
+                scoped_result, unscoped_result = await asyncio.gather(
+                    hybrid_search(
+                        context.store,
+                        query_text=query,
+                        role=context.role,
+                        namespaces=[context.department],
+                        top_k=top_k,
+                    ),
+                    hybrid_search(context.store, query_text=query, role=context.role, top_k=top_k),
+                    return_exceptions=True,
+                )
+                if isinstance(scoped_result, BaseException) and isinstance(
+                    unscoped_result, BaseException
+                ):
+                    raise unscoped_result
+                scoped = [] if isinstance(scoped_result, BaseException) else scoped_result
+                unscoped = [] if isinstance(unscoped_result, BaseException) else unscoped_result
+                scoped_count, unscoped_count = len(scoped), len(unscoped)
+                chunks = merge_prioritizing_scoped(scoped, unscoped, top_k=top_k)
+            else:
+                chunks = await hybrid_search(
+                    context.store, query_text=query, role=context.role, top_k=top_k
+                )
         except AppError as exc:
             # Matches `agents/nodes/retrieval.py`'s precedent: one degraded search source (or
             # Pinecone entirely down) empties the result rather than failing the whole plan.
             logger.warning("rlm_search_degraded", query=query, error=str(exc))
             return []
+        logger.info(
+            "rlm_search_completed",
+            query=query,
+            department=context.department,
+            top_k=top_k,
+            scoped_count=scoped_count,
+            unscoped_count=unscoped_count,
+            result_count=len(chunks),
+        )
         return [_chunk_to_dict(chunk) for chunk in chunks]
 
     def search(query: str, top_k: int = 10) -> list[dict[str, Any]]:
@@ -222,6 +280,10 @@ def build_search(context: RLMContext) -> Callable[..., list[dict[str, Any]]]:
         )
 
     return search
+
+
+_VALID_DOCUMENT_TYPES = frozenset(document_type.value for document_type in DocumentType)
+_VALID_DEPARTMENTS = frozenset(DEPARTMENTS)
 
 
 def filter_chunks(
@@ -234,7 +296,29 @@ def filter_chunks(
     """Pure and synchronous — no bridge needed. A convenience over the metadata fields every
     chunk dict already carries; anything not covered here (arbitrary predicates, date ranges) is
     still just a list comprehension away, since the sandbox's AST allowlist already permits
-    ordinary comprehensions over plain dicts."""
+    ordinary comprehensions over plain dicts.
+
+    An unrecognized `document_type` or `department` is logged and *ignored* rather than applied
+    literally — live testing found the model repeatedly inventing plausible-sounding values
+    ("outage report") that match no real chunk, silently zeroing an otherwise-correct plan's
+    entire result with no error anywhere to explain why. `rlm/planner.py`'s system prompt now
+    also tells the model the real values up front (the cheaper, more direct half of this same
+    fix); this is the defensive half for whatever it still gets wrong.
+    """
+    if document_type is not None and document_type not in _VALID_DOCUMENT_TYPES:
+        logger.warning(
+            "rlm_filter_ignored_unknown_document_type",
+            document_type=document_type,
+            valid_values=sorted(_VALID_DOCUMENT_TYPES),
+        )
+        document_type = None
+    if department is not None and department not in _VALID_DEPARTMENTS:
+        logger.warning(
+            "rlm_filter_ignored_unknown_department",
+            department=department,
+            valid_values=sorted(_VALID_DEPARTMENTS),
+        )
+        department = None
 
     def _matches(chunk: dict[str, Any]) -> bool:
         contains_ok = contains is None or contains.lower() in str(chunk.get("text", "")).lower()
@@ -322,6 +406,7 @@ async def _one_sub_agent_call(
         max_concurrent_sub_agents=context.max_concurrent_sub_agents,
         run_nested_plan=context.run_nested_plan,
         activity_writer=context.activity_writer,
+        department=context.department,
     )
     try:
         return await context.run_nested_plan(question=question, data=chunks, context=nested_context)

@@ -492,6 +492,46 @@ mechanism) rather than requiring any new paid service.
 
 Newest first. One line per meaningful change.
 
+- **2026-09-06** — Fixed five separate, sequentially-discovered RLM reliability and correctness
+  bugs, starting from a user report that an Analyst got "Research could not be completed:
+  Sandbox execution exceeded its 180.0s wall-clock budget" asking the spec's own example
+  question. Live-tested and root-caused each fix rather than guessing, and each fix's own retest
+  surfaced the next, previously-masked bug rather than fully resolving the turn — the honest
+  shape of this investigation, not smoothed over. (1) The 180s wall-clock budget and the 30s
+  per-call timeout were both too tight for `rlm/api.py`'s `reasoning=True` sub-agent/aggregate
+  calls (one isolated test: 12.7s and 693 reasoning tokens for a trivial 3-word prompt), tripping
+  `llm/chain.py`'s circuit breaker after 3 consecutive per-call timeouts and failing the whole
+  turn — fixed by raising `llm_request_timeout_seconds` 30s→90s, the breaker threshold 3→5, and
+  `rlm_plan_timeout_seconds` 180s→450s, now the real code defaults in `core/config.py`, not
+  local-only overrides (`docs/DECISIONS.md` §9). (2) Once turns stopped crashing, one completed
+  with a confidently wrong "no incidents identified" answer and zero visibility into why, because
+  `rlm/planner.py` only ever logged *failed* plan generation — fixed by logging every generated
+  or fallback plan's actual code (`rlm_generated_plan_used`/`rlm_fallback_plan_used`/
+  `rlm_plan_generation_call_failed`), which immediately exposed bug 3. (3) The RLM sandbox's own
+  `search()` (`rlm/api.py::build_search`) had never received trade-off 26's department-scoped/
+  all-department merge fix — only `agents/nodes/retrieval.py` had — so it ran a plain, unscoped,
+  all-6-department search vulnerable to the identical RRF-dilution bug; compounded by the model
+  inventing nonexistent `document_type`/`department` filter values ("outage report") that
+  silently zeroed correctly-retrieved evidence. Fixed by extracting the merge helper into a
+  shared `retrieval/hybrid.py::merge_prioritizing_scoped`, threading the Supervisor's department
+  guess through `RLMContext`/`execute_research`/`research_node` and every recursive sub-agent
+  context, teaching `rlm/planner.py`'s system prompt the real filter values, and making
+  `filter_chunks` ignore an unrecognized value defensively instead of matching nothing — verified
+  the retrieval half directly against live Pinecone, outside the running app, before trusting the
+  fix. (4) A recurring, still-unfixed model habit (`batch(chunks)` called without its required
+  `size` argument, seen on two separate runs) is documented rather than patched, since the
+  existing deterministic fallback plan already covers it correctly — confirmed live: a real,
+  correct, cited answer identifying four real recurring payment-failure root causes. (5) That
+  correct run still showed "Research complete (0 sub-agent call(s))" on the Activity Panel
+  despite 4 real ones running — a pre-existing Cycle 5 bug (the depth-0 runtime-fallback's fresh
+  `RLMBudget` swap, trade-off 17, was never read back by `execute_research`, which kept reading
+  its own original, un-incremented budget object) that had simply never had the chance to surface
+  before this session's combination of a runtime plan failure *and* a successful fallback. Fixed
+  by having `_run_plan_at_depth` return the actual budget object used. Final live re-verification
+  of the original question: 352s end to end, "Research complete (4 sub-agent call(s))" reported
+  correctly, a real, validated, evidence-grounded answer. Full narrative in
+  `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 27. 5 new tests (360 total, up from 355); `ruff`,
+  `ruff format`, `mypy --strict` all pass clean.
 - **2026-09-06** — Fixed a real regression in the department-scoped search fix from the
   previous entry below, found the next time the user actually used it: "find the document that
   outlines the data retention policy" and "find the document that details certificate rotation"

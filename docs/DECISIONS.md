@@ -277,6 +277,17 @@ default. `Settings.rlm_plan_timeout_seconds` was raised from 90s to 180s to matc
 execution of a full research turn (plan generation, search, up to four sequential sub-agent
 analyses, aggregation) measured 90–150s live on this hardware.
 
+A later session raised all three of these numbers again — `llm_request_timeout_seconds` 30s ->
+90s, `llm_circuit_breaker_failure_threshold` 3 -> 5, and `rlm_plan_timeout_seconds` 180s -> 450s
+— after live testing found the 180s figure above was itself measured against calls that
+happened to skip `reasoning=True`'s extra generation cost; `rlm/api.py`'s actual sub-agent and
+aggregate calls run with reasoning on (so the panel can show their thinking), which the earlier
+measurement did not account for, and routinely pushed individual calls well past the 30s
+per-call timeout — tripping the circuit breaker and failing the whole turn, the identical
+failure shape as the paragraph above, just triggered by request latency instead of concurrent
+fan-out. Full investigation, including two further correctness bugs the same session found once
+the turn could complete at all, in `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 27.
+
 ---
 
 ## 10. Prompt-injection detection: heuristics first, classifier only when ambiguous

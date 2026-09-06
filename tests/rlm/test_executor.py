@@ -19,9 +19,25 @@ from langchain_core.messages import BaseMessage, BaseMessageChunk
 
 from backend.app.core.security.rbac import Principal, Role
 from backend.app.llm.provider import SchemaT
+from backend.app.retrieval.models import RetrievedChunk
 from backend.app.rlm import api, executor
 from backend.app.rlm.api import RLMBudget, RLMContext
 from backend.app.rlm.executor import _run_plan_at_depth, _stringify, run_research
+
+
+def _chunk(chunk_id: str = "doc::sec") -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=chunk_id,
+        document_id="doc",
+        section="sec",
+        text="payment gateway timed out",
+        title="Payments Incident Report",
+        department="payments",
+        document_type="incident",
+        access_level="internal",
+        created_date="2025-01-01",
+        score=1.0,
+    )
 
 
 class _FakeLLM:
@@ -78,12 +94,13 @@ class TestRunPlanAtDepth:
         monkeypatch.setattr(executor, "generate_plan", _fake_generate_plan("result = 1 + 1", False))
         context = _context()
 
-        result, used_fallback = await _run_plan_at_depth(
+        result, used_fallback, budget = await _run_plan_at_depth(
             question="q", data=None, context=context, timeout_seconds=2.0
         )
 
         assert result == 2
         assert used_fallback is False
+        assert budget is context.budget
 
     async def test_a_generated_plan_that_fails_at_runtime_falls_back(
         self, monkeypatch: pytest.MonkeyPatch
@@ -96,12 +113,42 @@ class TestRunPlanAtDepth:
         monkeypatch.setattr(api, "hybrid_search", _fake_hybrid_search)
         context = _context()
 
-        result, used_fallback = await _run_plan_at_depth(
+        result, used_fallback, _ = await _run_plan_at_depth(
             question="q", data=None, context=context, timeout_seconds=5.0
         )
 
         assert used_fallback is True
         assert result == {"summary": "a summary", "recurring_themes": []}
+
+    async def test_a_depth_zero_runtime_fallback_reports_the_fresh_budget_it_actually_used(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exact live-verified bug: a depth-0 runtime fallback runs against a *fresh*
+        `RLMBudget` (not `context.budget` — see this function's own docstring on why), so a
+        caller that reports `context.budget.sub_agent_calls_made` afterward always reads a
+        budget that was never incremented, even when the fallback made real sub-agent calls.
+        The returned `budget` must be the one the fallback plan actually spent against."""
+        monkeypatch.setattr(executor, "generate_plan", _fake_generate_plan("result = 1 / 0", False))
+
+        async def _fake_hybrid_search(*args: object, **kwargs: object) -> list[RetrievedChunk]:
+            return [_chunk(f"c{i}") for i in range(5)]  # non-empty, so `sub_agents` actually fires
+
+        monkeypatch.setattr(api, "hybrid_search", _fake_hybrid_search)
+        context = _context()  # depth=0, per the helper above
+        assert context.budget.sub_agent_calls_made == 0
+
+        result, used_fallback, budget = await _run_plan_at_depth(
+            question="q", data=None, context=context, timeout_seconds=5.0
+        )
+
+        assert used_fallback is True
+        assert result == {"summary": "a summary", "recurring_themes": []}
+        # The fallback plan's own `sub_agents` call really did fire against a fresh budget...
+        assert budget.sub_agent_calls_made == 1
+        # ...which is a *different* object from the one `context` was constructed with — reading
+        # `context.budget` instead, as `execute_research` used to, would silently see 0.
+        assert budget is not context.budget
+        assert context.budget.sub_agent_calls_made == 0
 
     async def test_a_failing_fallback_plan_is_not_retried_again(
         self, monkeypatch: pytest.MonkeyPatch

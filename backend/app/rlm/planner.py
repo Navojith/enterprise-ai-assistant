@@ -20,14 +20,29 @@ generated code fails validation":
 
 from __future__ import annotations
 
+import structlog
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from backend.app.core.errors import AppError, SandboxViolationError
 from backend.app.llm.provider import LLMProvider
+from backend.app.retrieval.models import DEPARTMENTS, DocumentType
 from backend.app.rlm.sandbox import validate_ast
 
+logger = structlog.get_logger(__name__)
+
 _PLAN_GENERATION_ATTEMPTS = 2
+
+# Named explicitly in the prompt below rather than left to the model to guess — live testing
+# found it repeatedly inventing plausible-sounding but nonexistent values ("report", "outage
+# report") for `document_type`, which `filter()` then applied literally: a plan can pass AST
+# validation and run to completion while silently discarding every real chunk, because
+# `validate_ast` only checks what constructs a plan uses, never whether the values it passes
+# are real. `filter_chunks` (`rlm/api.py`) now also ignores an unrecognized value defensively
+# rather than zeroing the result, but fixing what the model is told in the first place is the
+# cheaper, more direct half of the same fix.
+_VALID_DOCUMENT_TYPES = ", ".join(sorted(document_type.value for document_type in DocumentType))
+_VALID_DEPARTMENTS = ", ".join(DEPARTMENTS)
 
 _SYSTEM_PROMPT = (
     "You are generating a short Python search plan to research a question over a large "
@@ -37,7 +52,9 @@ _SYSTEM_PROMPT = (
     "returns chunk dicts with keys text, title, section, department, document_type, "
     "created_date, score.\n"
     "- filter(chunks: list[dict], contains: str = None, document_type: str = None, "
-    "department: str = None) -> list[dict]: narrow a list of chunk dicts.\n"
+    "department: str = None) -> list[dict]: narrow a list of chunk dicts. Valid "
+    f"document_type values: {_VALID_DOCUMENT_TYPES}. Valid department values: "
+    f"{_VALID_DEPARTMENTS}. Any other value matches nothing — do not invent one.\n"
     "- batch(chunks: list[dict], size: int) -> list[list[dict]]: split into fixed-size "
     "batches.\n"
     "- sub_agent(question: str, chunks: list[dict]) -> str: recursively analyze ONE batch "
@@ -103,25 +120,49 @@ def _retry_messages(
 async def generate_plan(question: str, *, llm: LLMProvider) -> tuple[str, bool]:
     """Returns `(code, used_fallback)`. `used_fallback=True` tells `rlm/executor.py` (and,
     through it, the Agent Activity Panel) that the deterministic plan ran instead of a generated
-    one — a real degradation worth showing, not silently swallowed."""
+    one — a real degradation worth showing, not silently swallowed.
+
+    Every plan this function decides to hand back — generated or fallback — is logged with its
+    full source, not just whether it was used: `validate_ast` only checks that generated code
+    uses *allowed constructs*, never that it is actually *correct*, so a plan can validate and
+    run to completion while quietly doing the wrong thing (e.g. never calling `search`/
+    `sub_agent` at all) and no exception anywhere would otherwise reveal that. Live verification
+    hit exactly this — a validated, zero-`sub_agent`-call plan produced a confident "no evidence
+    found" answer for a question the corpus genuinely had evidence for — with nothing in the logs
+    to show what the generated code had actually done. `rlm/executor.py` already logs *runtime*
+    failures of a plan that validated (`rlm_generated_plan_failed_at_runtime`); the two validation
+    failure and generation-call-failure logs below cover the two paths this module can take
+    instead of returning that success is not itself a guarantee of correctness.
+    """
     messages: list[AnyMessage] = [
         SystemMessage(content=_SYSTEM_PROMPT),
         HumanMessage(content=question),
     ]
 
-    for _attempt in range(1, _PLAN_GENERATION_ATTEMPTS + 1):
+    for attempt in range(1, _PLAN_GENERATION_ATTEMPTS + 1):
         try:
             plan = await llm.astructured(messages, schema=ResearchPlan, reasoning=True)
-        except AppError:
+        except AppError as exc:
             # An unavailable/timed-out model is not worth a second attempt at prompting —
             # go straight to the deterministic plan, matching `llm/ollama_provider.py`'s own
             # one-retry-then-give-up shape for a different failure class.
+            logger.warning("rlm_plan_generation_call_failed", attempt=attempt, error=str(exc))
             break
         try:
             validate_ast(plan.code)
         except SandboxViolationError as exc:
+            logger.warning(
+                "rlm_generated_plan_failed_validation",
+                attempt=attempt,
+                question=question,
+                code=plan.code,
+                violations=(exc.details or {}).get("violations"),
+            )
             messages = _retry_messages(question, previous_code=plan.code, violation=exc)
             continue
+        logger.info("rlm_generated_plan_used", attempt=attempt, question=question, code=plan.code)
         return plan.code, False
 
-    return deterministic_fallback_plan(question), True
+    fallback_code = deterministic_fallback_plan(question)
+    logger.info("rlm_fallback_plan_used", question=question, code=fallback_code)
+    return fallback_code, True
