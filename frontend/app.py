@@ -9,7 +9,7 @@ results) is a direct render of an `ActivityEvent` the backend's own graph emitte
 that module's docstring for why) — this file never infers or narrates what the agent is doing,
 only displays it, so the panel can never drift out of sync with what actually happened.
 
-Run with `streamlit run frontend/app.py` (see `docs/SETUP.md`). `BACKEND_URL` is read from the
+Run with `python -m streamlit run frontend/app.py` (see `docs/SETUP.md`). `BACKEND_URL` is read from the
 environment (default `http://localhost:8000`) rather than hardcoded, so the same file works
 against a locally-run backend or one reachable at another address without editing code.
 """
@@ -59,7 +59,9 @@ _NODE_ICONS: dict[str, str] = {
 
 # Streamed token-by-token into the answer/reasoning placeholders, not the step-by-step log —
 # logging every individual token would turn the Agent Activity Panel into noise.
-_STREAMED_TEXT_EVENTS = frozenset({ActivityEventType.ANSWER_DELTA, ActivityEventType.REASONING})
+_STREAMED_TEXT_EVENTS = frozenset(
+    {ActivityEventType.ANSWER_DELTA, ActivityEventType.REASONING}
+)
 
 
 def _init_session_state() -> None:
@@ -103,7 +105,8 @@ def _backend_status(base_url: str) -> tuple[bool, str]:
     """Best-effort liveness probe for the sidebar — never raises, since a frontend that cannot
     reach the backend yet should still render a login form and a clear status, not a stack
     trace. Deliberately calls `/health/live`, not `/health/ready`: the sidebar cares whether the
-    *process* is reachable at all, not whether its Postgres dependency is currently healthy."""
+    *process* is reachable at all, not whether its Postgres dependency is currently healthy.
+    """
     try:
         response = httpx.get(f"{base_url}/api/v1/health/live", timeout=2.0)
         return response.status_code == httpx.codes.OK, "reachable"
@@ -113,7 +116,9 @@ def _backend_status(base_url: str) -> tuple[bool, str]:
 
 def _render_login_screen() -> None:
     st.title("🏦 Enterprise AI Assistant")
-    st.caption("Sign in to start a conversation. See docs/SETUP.md for account details.")
+    st.caption(
+        "Sign in to start a conversation. See docs/SETUP.md for account details."
+    )
 
     reachable, detail = _backend_status(st.session_state.backend_url)
     if not reachable:
@@ -124,7 +129,9 @@ def _render_login_screen() -> None:
 
     st.subheader("Quick demo login")
     columns = st.columns(len(_DEMO_USERS))
-    for column, (label, (username, password)) in zip(columns, _DEMO_USERS.items(), strict=True):
+    for column, (label, (username, password)) in zip(
+        columns, _DEMO_USERS.items(), strict=True
+    ):
         if column.button(f"Log in as {label}", use_container_width=True):
             _log_in(username, password)
 
@@ -155,7 +162,8 @@ def _render_sidebar(session: Session) -> None:
 def _format_event_data(data: dict[str, Any]) -> str:
     """A short, single-line rendering of an event's auxiliary payload — chunk ids, tool
     arguments, route choice — for the caption under a log line. Deliberately truncated rather
-    than pretty-printed JSON, since the Agent Activity Panel is a running log, not an inspector."""
+    than pretty-printed JSON, since the Agent Activity Panel is a running log, not an inspector.
+    """
     parts = [f"{key}={value!r}" for key, value in data.items()]
     rendered = ", ".join(parts)
     return rendered if len(rendered) <= 160 else f"{rendered[:157]}..."
@@ -254,14 +262,20 @@ def _run_turn(session: Session, prompt: str) -> None:
             else:
                 _render_activity_event(log_container, event)
     except RateLimitedError as exc:
-        retry = f" Try again in {exc.retry_after_seconds:.0f}s." if exc.retry_after_seconds else ""
+        retry = (
+            f" Try again in {exc.retry_after_seconds:.0f}s."
+            if exc.retry_after_seconds
+            else ""
+        )
         error_message = f"{exc.message}{retry}"
     except BackendError as exc:
         error_message = exc.message
 
     status_placeholder.empty()
     if not answer_text:
-        answer_text = f"⚠️ {error_message}" if error_message else "⚠️ No response was generated."
+        answer_text = (
+            f"⚠️ {error_message}" if error_message else "⚠️ No response was generated."
+        )
         answer_placeholder.error(answer_text)
     elif error_message:
         answer_text = f"{answer_text}\n\n⚠️ {error_message}"
@@ -274,7 +288,9 @@ def _render_chat_screen(session: Session) -> None:
     _render_sidebar(session)
     st.title("🏦 Enterprise AI Assistant")
 
-    prompt = st.chat_input("Ask about policies, incidents, runbooks, or product specs...")
+    prompt = st.chat_input(
+        "Ask about policies, incidents, runbooks, or product specs..."
+    )
     if prompt:
         _run_turn(session, prompt)
         return
@@ -287,7 +303,9 @@ def _render_chat_screen(session: Session) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Enterprise AI Assistant", page_icon="🏦", layout="wide")
+    st.set_page_config(
+        page_title="Enterprise AI Assistant", page_icon="🏦", layout="wide"
+    )
     _init_session_state()
 
     session: Session | None = st.session_state.session

@@ -24,7 +24,7 @@ video automatically. See the pre-flight checklist first.
    ollama serve                      # if not already running as a service
    python -m mcp_server
    uvicorn backend.app.main:app --port 8000 --loop backend.app.core.loop:selector_loop_factory
-   streamlit run frontend/app.py
+   python -m streamlit run frontend/app.py
    ```
 2. **Confirm `.env` has `LANGSMITH_TRACING=true`** and a real `LANGSMITH_API_KEY` — the demo's
    traces requirement depends on this being on, not the development-default `false`.
@@ -76,6 +76,7 @@ again rather than treating it as a failed take.
 ## 0:00 – 2:00 — Introduction
 
 State plainly, without reading verbatim:
+
 - What this is: an enterprise AI assistant over internal documents (policies, architecture docs,
   runbooks, incident reports, product specs, meeting notes) for a fictional commercial bank,
   built for the AI Lead Technical Assessment.
@@ -117,12 +118,14 @@ privilege, regardless of what the model is tricked into saying.
 ## 6:00 – 8:00 — Code quality and tests (Code Quality 5%, Documentation 5%, Async Engineering 5%)
 
 In a terminal, run and let these finish on screen:
+
 ```bash
 pytest -q
 ruff check .
 ruff format --check .
 mypy
 ```
+
 Narrate while they run: **391 tests, all passing**; strict typing throughout; a real exception
 hierarchy with graceful degradation (`core/errors.py`); structured JSON logging with correlation
 IDs tying backend logs to LangSmith traces. Briefly scroll the folder structure
@@ -141,6 +144,7 @@ In Streamlit, click **"Log in as Viewer."** Ask:
 While it streams, narrate the Agent Activity Panel **live, in order**: Guardrail passes →
 Supervisor routes to retrieval → Retrieval reports "Querying dense and sparse indexes
 concurrently" then a chunk count → Response streams the answer → Validator passes. Point out:
+
 - The answer's inline `[Title]` citations, and that the Validator would have rejected the answer
   and looped back to Response if a citation didn't match a real retrieved chunk
   (`guardrails/citations.py`).
@@ -162,7 +166,7 @@ server, and returned a cited result — a live `tool_call` event with the actual
 arguments.
 
 Now log out, log in as **Viewer**, and ask the **identical question**. Point out what's
-*different*, not just what fails: the Tools node still runs, but its own tool-choice call was
+_different_, not just what fails: the Tools node still runs, but its own tool-choice call was
 never even offered `employee_directory` — bind-time filtering (`tools/registry.py::
 available_to`) removed it before the LLM ever saw it as an option — so it falls back to
 `knowledge_search` instead. State the point explicitly: **this is enforced twice, independently**
@@ -185,6 +189,7 @@ higher figure than earlier in this project's build, after two rounds of live tes
 original timeout/budget numbers too tight for `reasoning=True` sub-agent calls and were raising
 them, not tightening the design. **Use the wait time to narrate the design**, not just watch the
 spinner:
+
 - The Research node generates a **real Python search plan** against a curated API (`search` /
   `filter` / `group_by_document` / `batch` / `sub_agent` / `sub_agents` / `aggregate`), not a
   hand-written pipeline.
@@ -196,12 +201,12 @@ spinner:
   plainly if it happens on camera rather than treating it as a failed take: the fallback still
   produces a real, evidence-grounded, correctly-cited answer — that's the point of having one.
 - Sub-agent fan-out is deliberately **sequential on this hardware** (`rlm_max_concurrent_
-  sub_agents=1`) — one local model does not serve concurrent requests in parallel, so this
+sub_agents=1`) — one local model does not serve concurrent requests in parallel, so this
   trades latency for reliability rather than self-DoS-ing the one model every other node also
   depends on (`docs/DECISIONS.md` §9 — a real, live-measured finding, not a guess).
 - Reranking and document-safe batching (`group_by_document`, so no sub-agent sees one incident's
   sections split across batches) were both added to this path after the fact, once live testing
-  showed the research route could otherwise answer *worse* than the plain retrieval route above
+  showed the research route could otherwise answer _worse_ than the plain retrieval route above
   for the identical question — a real regression, found and fixed, worth stating out loud since it
   shows the harder path was actually validated against the easier one, not just built.
 
@@ -223,7 +228,7 @@ the design explicitly: a deterministic heuristic filter catches confident attack
 classifier call (`docs/DECISIONS.md` §10) — a cost/coverage trade-off made deliberately, not by
 default. Mention the second, independent channel: retrieved documents and tool output are framed
 as untrusted data (`guardrails/injection.py::frame_untrusted_content`) since a compromised
-*document* is an injection vector a chat-endpoint screen alone can never see.
+_document_ is an injection vector a chat-endpoint screen alone can never see.
 
 ---
 
@@ -231,9 +236,10 @@ as untrusted data (`guardrails/injection.py::frame_untrusted_content`) since a c
 
 Switch to the LangSmith tab, open the `enterprise-ai-assistant` project, and open the most recent
 `chat_turn` root run (from any turn above — the injection block is a good one to show, since it
-demonstrates a *blocked* turn is traced too, not just a successful one).
+demonstrates a _blocked_ turn is traced too, not just a successful one).
 
 Point out:
+
 - The root run's **tags** (`role:viewer`/`role:analyst`) and **metadata** (`thread_id`,
   `correlation_id`, `principal_username`) — set explicitly on the graph invocation, not left to
   guesswork.
@@ -241,7 +247,7 @@ Point out:
   `research`, `response`, `validator`, plus the underlying `ChatOllama` LLM calls — a real,
   correctly-nested trace tree, not a flat list.
 - Mention briefly, as a real finding rather than something assumed to work: getting this nested
-  tracing working required attaching tracing *explicitly* as a callback on the graph invocation
+  tracing working required attaching tracing _explicitly_ as a callback on the graph invocation
   — the "just set an env var" approach that's usually sufficient for LangChain code did not
   reach calls made from inside a LangGraph node in live testing (`docs/DECISIONS.md` §11,
   `docs/ASSUMPTIONS_AND_TRADEOFFS.md` trade-off 21). This is exactly the kind of thing worth
@@ -276,12 +282,12 @@ found through live use, not just a list of limitations:
    from "no component may bill" to "a single local `qwen3:4b` serves every graph node," and what
    that costs in answer quality (accepted, mitigated by schema-constrained decoding, §5).
 2. **Trade-off 26–27 (RLM retrieval crowding and the timeout/budget escalation just shown):** a
-   wrong department guess could make the research route's own retrieval *worse than no scoping at
-   all*, and the original timeout/concurrency budget was tuned too tight for `reasoning=True`
+   wrong department guess could make the research route's own retrieval _worse than no scoping at
+   all_, and the original timeout/concurrency budget was tuned too tight for `reasoning=True`
    sub-agent calls — both found by reproducing a real bad answer live rather than guessing, and
    both fixed with the specific numbers now visible in the segment above.
 3. **Trade-off 20 (the dedicated live security-testing pass):** three real gaps found by
-   *attacking* the guardrails rather than only confirming they pass their own designed-for test
+   _attacking_ the guardrails rather than only confirming they pass their own designed-for test
    cases — a widened injection heuristic, a sandbox dunder-name bypass, and a shared-thread-pool
    DoS risk, all fixed and re-verified live.
 4. **Trade-off 31 (temporal grounding):** a user-reported wrong refusal — "that year hasn't
@@ -292,7 +298,7 @@ found through live use, not just a list of limitations:
 
 Close this segment with the standing discipline behind all of it: free-tier and pricing claims
 were verified against live provider documentation, not recalled from training data
-(`docs/DECISIONS.md` §4) — this is *why* the reranker is allowlisted against a specific billed
+(`docs/DECISIONS.md` §4) — this is _why_ the reranker is allowlisted against a specific billed
 model name (`cohere-rerank-3.5`) rather than trusting "the Pinecone hosted reranker" to be free.
 
 ---
@@ -300,6 +306,7 @@ model name (`cohere-rerank-3.5`) rather than trusting "the Pinecone hosted reran
 ## 41:00 – 45:00 — Wrap-up
 
 State plainly what was scoped out and why, rather than leaving it implicit:
+
 - **Not built:** human-in-the-loop approval, long-term (cross-session) memory, an answer-quality
   feedback loop. Each is architecturally accommodated (HITL maps to a LangGraph interrupt node;
   long-term memory to a second store behind the existing memory interface) but was traded against
